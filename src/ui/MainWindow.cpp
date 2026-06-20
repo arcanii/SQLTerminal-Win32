@@ -19,8 +19,12 @@
 #include "core/SqlStatementSplitter.h"
 #include "core/SqlSyntaxHighlighter.h"
 #include "db/DatabaseSession.h"
+#include "models/ConnectionProfile.h"
 #include "models/DatabaseConnection.h"
 #include "models/QueryResult.h"
+#include "persistence/Stores.h"
+#include "security/CredentialStore.h"
+#include "ui/ConnectionDialog.h"
 
 namespace sqlterm {
 namespace {
@@ -66,7 +70,7 @@ struct AppState {
     bool cancelRequested = false; // user hit Ctrl+. for the in-flight query
     DatabaseSession session;
     std::wstring dbName;
-    std::wstring pendingPath;     // path being connected to
+    std::optional<ConnectionRequest> pendingRequest;  // connection being established
 };
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
@@ -284,27 +288,38 @@ void doOpen(AppState* st) {
         setStatus(st, L"A query is running — Ctrl+. to cancel before opening.");
         return;
     }
-    wchar_t file[1024] = L"";
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = st->hwnd;
-    ofn.lpstrFilter = L"SQLite Database\0*.db;*.sqlite;*.sqlite3\0All Files\0*.*\0";
-    ofn.lpstrFile = file;
-    ofn.nMaxFile = 1024;
-    ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
-    ofn.lpstrTitle = L"Open or Create SQLite Database";
-    if (!GetOpenFileNameW(&ofn)) return;
+    auto req = showConnectionDialog(st->hwnd);
+    if (!req) return;
 
-    st->pendingPath = file;
-    DatabaseConnection cfg;
-    cfg.engine = DatabaseEngine::Sqlite;
-    cfg.filePath = file;
+    st->pendingRequest = req;
     setStatus(st, L"Connecting…");
     HWND hwnd = st->hwnd;
-    st->session.connectAsync(cfg, [hwnd](bool ok, std::wstring err) {
+    st->session.connectAsync(req->connection, [hwnd](bool ok, std::wstring err) {
         auto* m = new ConnectMsg{ok, std::move(err)};
         if (!PostMessageW(hwnd, WM_APP_CONNECTED, 0, reinterpret_cast<LPARAM>(m))) delete m;
     });
+}
+
+// Record recents / save profile / store-or-clear password after a successful connect.
+void applyConnectionPersistence(AppState* st) {
+    if (!st->pendingRequest) return;
+    const DatabaseConnection& c = st->pendingRequest->connection;
+    if (c.engine == DatabaseEngine::Sqlite) {
+        const size_t slash = c.filePath.find_last_of(L"\\/");
+        st->dbName = (slash == std::wstring::npos) ? c.filePath : c.filePath.substr(slash + 1);
+    } else {
+        st->dbName = c.databaseName;
+    }
+    RecentConnectionsStore::add(ConnectionProfile(c));
+    if (st->pendingRequest->saveAsName)
+        SavedProfilesStore::save(ConnectionProfile(c, st->pendingRequest->saveAsName));
+    if (c.engine == DatabaseEngine::Postgres) {
+        const std::wstring acct = CredentialStore::accountKey(c);
+        if (st->pendingRequest->rememberPassword && !c.password.empty())
+            CredentialStore::savePassword(acct, c.password);
+        else
+            CredentialStore::deletePassword(acct);
+    }
 }
 
 void createChildren(AppState* st, HINSTANCE hInst) {
@@ -453,9 +468,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_APP_CONNECTED: {
             auto* m = reinterpret_cast<ConnectMsg*>(lParam);
             if (m->ok) {
-                const std::wstring& path = st->pendingPath;
-                const size_t slash = path.find_last_of(L"\\/");
-                st->dbName = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+                applyConnectionPersistence(st);
                 clearGrid(st->hList);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
@@ -464,6 +477,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
             }
+            st->pendingRequest.reset();
             delete m;
             return 0;
         }

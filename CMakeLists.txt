@@ -133,8 +133,9 @@ add_test(NAME SqlStoreTests COMMAND SqlStoreTests)
 # ---------------------------------------------------------------------------
 add_executable(SQLTerminal WIN32
   src/WinMain.cpp
-  src/ui/MainWindow.cpp)
-target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore comctl32 comdlg32)
+  src/ui/MainWindow.cpp
+  src/ui/ConnectionDialog.cpp)
+target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore SqlStore comctl32 comdlg32)
 sqlt_copy_pg_dlls(SQLTerminal)
 
 # Future phases (P4) will add find_package(PostgreSQL)/libpq + nlohmann_json via
