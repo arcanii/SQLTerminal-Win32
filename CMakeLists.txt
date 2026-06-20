@@ -78,6 +78,16 @@ target_include_directories(SqlDb PUBLIC src)
 target_link_libraries(SqlDb PUBLIC sqlite3 SqlCore PostgreSQL::PostgreSQL)
 
 # ---------------------------------------------------------------------------
+# SqlApp — pure terminal-controller logic (dot-commands, guards, transactions,
+# command history, smart-quotes, schema SQL).
+# ---------------------------------------------------------------------------
+add_library(SqlApp STATIC
+  src/app/DotCommandHandler.cpp
+  src/app/TerminalLogic.cpp)
+target_include_directories(SqlApp PUBLIC src)
+target_link_libraries(SqlApp PUBLIC SqlCore)
+
+# ---------------------------------------------------------------------------
 # SqlStore — JSON persistence (%APPDATA%) + Windows Credential Manager.
 # ---------------------------------------------------------------------------
 add_library(SqlStore STATIC
@@ -127,6 +137,11 @@ add_executable(SqlStoreTests tests/store_tests.cpp)
 target_link_libraries(SqlStoreTests PRIVATE SqlStore)
 target_include_directories(SqlStoreTests PRIVATE tests)
 add_test(NAME SqlStoreTests COMMAND SqlStoreTests)
+
+add_executable(AppTests tests/app_tests.cpp)
+target_link_libraries(AppTests PRIVATE SqlApp)
+target_include_directories(AppTests PRIVATE tests)
+add_test(NAME AppTests COMMAND AppTests)
 
 # ---------------------------------------------------------------------------
 # SQLTerminal — the Win32 GUI app.
