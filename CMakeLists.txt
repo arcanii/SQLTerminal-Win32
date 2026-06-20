@@ -167,7 +167,7 @@ add_executable(SQLTerminal WIN32
   src/platform/Updater.cpp
   packaging/SQLTerminal.rc)
 target_link_libraries(SQLTerminal PRIVATE
-  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32)
+  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi)
 # Our manifest is embedded via the .rc; stop the linker generating a competing one.
 if(MSVC)
   target_link_options(SQLTerminal PRIVATE /MANIFEST:NO)

@@ -9,6 +9,7 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 
 #define _RICHEDIT_VER 0x0500
 #include <richedit.h>
@@ -149,6 +150,20 @@ struct AppState {
 
 double epochNow() {
     return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Follow the system light/dark setting for the window title bar (Win10 2004+).
+bool systemUsesDarkMode() {
+    DWORD value = 1, size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
+        return false;
+    return value == 0;
+}
+void applyDarkTitleBar(HWND hwnd) {
+    BOOL dark = systemUsesDarkMode() ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
 }
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
@@ -904,6 +919,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             createChildren(st, reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance);
             buildMenu(hwnd);
             layout(st);
+            applyDarkTitleBar(hwnd);
+            return 0;
+        case WM_SETTINGCHANGE:
+            applyDarkTitleBar(hwnd);  // react to light/dark toggle
             return 0;
         case WM_SIZE:
             if (st) layout(st);
