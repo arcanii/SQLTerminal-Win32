@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,6 +39,7 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"SQLTerminalMainWindow";
 constexpr wchar_t kSplitterClass[] = L"SQLTerminalSplitter";
+constexpr wchar_t kVSplitterClass[] = L"SQLTerminalVSplitter";
 
 enum : int {
     ID_OPEN = 1001,
@@ -51,18 +53,33 @@ enum : int {
     ID_TX_ROLLBACK = 1009,
     ID_HIST_UP = 1010,
     ID_HIST_DOWN = 1011,
+    ID_REFRESH_SCHEMA = 1012,
+    ID_CTX_INSERT = 1013,
+    ID_CTX_PREVIEW = 1014,
+    ID_CTX_COPY = 1015,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
     IDC_STATUS = 2005,
+    IDC_TREE = 2006,
+    IDC_VSPLIT = 2007,
 };
 
 constexpr UINT WM_APP_RESULT = WM_APP + 1;     // lParam = QueryResult*
 constexpr UINT WM_APP_CONNECTED = WM_APP + 2;  // lParam = ConnectMsg*
+constexpr UINT WM_APP_TABLES = WM_APP + 3;     // lParam = TablesMsg*
+constexpr UINT WM_APP_COLUMNS = WM_APP + 4;    // lParam = ColumnsMsg*
 
 struct ConnectMsg {
     bool ok;
     std::wstring error;
+};
+struct TablesMsg {
+    std::vector<std::wstring> tables;
+};
+struct ColumnsMsg {
+    HTREEITEM node;
+    std::vector<std::wstring> lines;
 };
 
 constexpr int kSplitterHeight = 6;
@@ -75,8 +92,12 @@ struct AppState {
     HWND hEdit = nullptr;
     HWND hSplitter = nullptr;
     HWND hStatus = nullptr;
+    HWND hTree = nullptr;
+    HWND hVSplitter = nullptr;
     HFONT hMono = nullptr;
     int editorHeight = 150;
+    int sidebarWidth = 220;
+    std::wstring contextTable;  // table the schema context menu acted on
     bool suppressHighlight = false;
     bool busy = false;
     bool cancelRequested = false;
@@ -206,6 +227,19 @@ void layout(AppState* st) {
     const int cw = rc.right;
     const int ch = (std::max)(0L, static_cast<long>(rc.bottom - statusHeight(st)));
 
+    // Left: schema sidebar (tree) + vertical splitter.
+    const int vsW = kSplitterHeight;
+    int sw = st->sidebarWidth;
+    int maxSidebar = cw - 200 - vsW;
+    if (maxSidebar < 120) maxSidebar = (std::max)(0, cw - vsW);
+    if (sw > maxSidebar) sw = maxSidebar;
+    if (sw < 0) sw = 0;
+    const int rx = sw + vsW;
+    const int rw = (std::max)(0, cw - rx);
+    MoveWindow(st->hTree, 0, 0, sw, ch, TRUE);
+    MoveWindow(st->hVSplitter, sw, 0, vsW, ch, TRUE);
+
+    // Right: results / horizontal splitter / editor.
     int editH = st->editorHeight;
     int maxEdit = ch - kMinList - kSplitterHeight;
     if (maxEdit < kMinEditor) maxEdit = (std::max)(0, ch - kSplitterHeight);
@@ -214,9 +248,9 @@ void layout(AppState* st) {
     int listH = ch - editH - kSplitterHeight;
     if (listH < 0) listH = 0;
 
-    MoveWindow(st->hList, 0, 0, cw, listH, TRUE);
-    MoveWindow(st->hSplitter, 0, listH, cw, kSplitterHeight, TRUE);
-    MoveWindow(st->hEdit, 0, listH + kSplitterHeight, cw, editH, TRUE);
+    MoveWindow(st->hList, rx, 0, rw, listH, TRUE);
+    MoveWindow(st->hSplitter, rx, listH, rw, kSplitterHeight, TRUE);
+    MoveWindow(st->hEdit, rx, listH + kSplitterHeight, rw, editH, TRUE);
 
     if (st->hStatus) {
         int parts[2] = {cw - 180, -1};
@@ -449,6 +483,16 @@ void createChildren(AppState* st, HINSTANCE hInst) {
                                     hInst, nullptr);
     SetWindowLongPtrW(st->hSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
+    st->hTree = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_TREEVIEW, L"",
+        WS_CHILD | WS_VISIBLE | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
+        0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TREE)), hInst, nullptr);
+    st->hVSplitter = CreateWindowExW(0, kVSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                                     st->hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VSPLIT)),
+                                     hInst, nullptr);
+    SetWindowLongPtrW(st->hVSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+
     st->hEdit = CreateWindowExW(
         WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
@@ -490,6 +534,8 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(query, MF_STRING, ID_TX_BEGIN, L"&Begin Transaction");
     AppendMenuW(query, MF_STRING, ID_TX_COMMIT, L"Co&mmit Transaction");
     AppendMenuW(query, MF_STRING, ID_TX_ROLLBACK, L"Roll&back Transaction");
+    AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(query, MF_STRING, ID_REFRESH_SCHEMA, L"Re&fresh Schema");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
     SetMenu(hwnd, bar);
 }
@@ -522,6 +568,189 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK VSplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            SetCapture(hwnd);
+            return 0;
+        case WM_MOUSEMOVE:
+            if (st && (wParam & MK_LBUTTON) && GetCapture() == hwnd) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(st->hwnd, &pt);
+                RECT rc;
+                GetClientRect(st->hwnd, &rc);
+                int newW = pt.x;
+                int maxW = rc.right - 200 - kSplitterHeight;
+                if (maxW < 120) maxW = 120;
+                if (newW < 120) newW = 120;
+                if (newW > maxW) newW = maxW;
+                st->sidebarWidth = newW;
+                layout(st);
+            }
+            return 0;
+        case WM_LBUTTONUP:
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// ---- schema sidebar ---------------------------------------------------------
+
+std::wstring treeItemText(HWND tree, HTREEITEM node) {
+    wchar_t buf[512] = L"";
+    TVITEMW it{};
+    it.mask = TVIF_TEXT;
+    it.hItem = node;
+    it.pszText = buf;
+    it.cchTextMax = 512;
+    TreeView_GetItem(tree, &it);
+    return buf;
+}
+
+void copyToClipboard(HWND hwnd, const std::wstring& text) {
+    if (!OpenClipboard(hwnd)) return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        if (void* p = GlobalLock(h)) {
+            std::memcpy(p, text.c_str(), bytes);
+            GlobalUnlock(h);
+            SetClipboardData(CF_UNICODETEXT, h);
+        }
+    }
+    CloseClipboard();
+}
+
+void fetchTablesAsync(AppState* st) {
+    if (!st->session.isConnected()) return;
+    HWND hwnd = st->hwnd;
+    st->session.executeUncancellableAsync(tableNamesSql(st->currentEngine), [hwnd](QueryResult r) {
+        auto* m = new TablesMsg{};
+        if (!r.error)
+            for (const auto& row : r.rows)
+                if (!row.empty()) m->tables.push_back(row[0]);
+        if (!PostMessageW(hwnd, WM_APP_TABLES, 0, reinterpret_cast<LPARAM>(m))) delete m;
+    });
+}
+
+void populateTables(AppState* st, const std::vector<std::wstring>& tables) {
+    TreeView_DeleteAllItems(st->hTree);
+    for (const auto& t : tables) {
+        TVINSERTSTRUCTW ins{};
+        ins.hParent = TVI_ROOT;
+        ins.hInsertAfter = TVI_LAST;
+        ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        ins.item.pszText = const_cast<LPWSTR>(t.c_str());
+        ins.item.lParam = 0;  // table, columns not yet loaded
+        HTREEITEM node = TreeView_InsertItem(st->hTree, &ins);
+        // A placeholder child so the [+] expander shows; replaced on expand.
+        TVINSERTSTRUCTW dummy{};
+        dummy.hParent = node;
+        dummy.hInsertAfter = TVI_LAST;
+        dummy.item.mask = TVIF_TEXT | TVIF_PARAM;
+        dummy.item.pszText = const_cast<LPWSTR>(L"(loading…)");
+        dummy.item.lParam = 2;
+        TreeView_InsertItem(st->hTree, &dummy);
+    }
+}
+
+void fetchColumnsForNode(AppState* st, HTREEITEM node) {
+    const std::wstring table = treeItemText(st->hTree, node);
+    const DatabaseEngine engine = st->currentEngine;
+    HWND hwnd = st->hwnd;
+    st->session.executeUncancellableAsync(columnsSql(engine, table), [hwnd, node, engine](QueryResult r) {
+        auto* m = new ColumnsMsg{};
+        m->node = node;
+        if (!r.error) {
+            for (const auto& row : r.rows) {
+                std::wstring name, type;
+                if (engine == DatabaseEngine::Postgres) {
+                    name = row.size() > 0 ? row[0] : L"";
+                    type = row.size() > 1 ? row[1] : L"";
+                } else {  // SQLite PRAGMA table_info: cid, name, type, ...
+                    name = row.size() > 1 ? row[1] : L"";
+                    type = row.size() > 2 ? row[2] : L"";
+                }
+                m->lines.push_back(type.empty() ? name : (name + L"  :  " + type));
+            }
+        }
+        if (!PostMessageW(hwnd, WM_APP_COLUMNS, 0, reinterpret_cast<LPARAM>(m))) delete m;
+    });
+}
+
+void populateColumns(AppState* st, HTREEITEM node, const std::vector<std::wstring>& lines) {
+    TVITEMW mark{};
+    mark.mask = TVIF_PARAM;
+    mark.hItem = node;
+    mark.lParam = 1;  // loaded
+    TreeView_SetItem(st->hTree, &mark);
+
+    HTREEITEM child = TreeView_GetChild(st->hTree, node);
+    while (child) {
+        HTREEITEM next = TreeView_GetNextSibling(st->hTree, child);
+        TreeView_DeleteItem(st->hTree, child);
+        child = next;
+    }
+    const std::vector<std::wstring> shown = lines.empty() ? std::vector<std::wstring>{L"(no columns)"} : lines;
+    for (const auto& line : shown) {
+        TVINSERTSTRUCTW ins{};
+        ins.hParent = node;
+        ins.hInsertAfter = TVI_LAST;
+        ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+        ins.item.pszText = const_cast<LPWSTR>(line.c_str());
+        ins.item.lParam = 2;
+        TreeView_InsertItem(st->hTree, &ins);
+    }
+    TreeView_Expand(st->hTree, node, TVE_EXPAND);
+}
+
+void onTreeExpand(AppState* st, NMTREEVIEWW* nm) {
+    if (nm->action != TVE_EXPAND) return;
+    TVITEMW q{};
+    q.mask = TVIF_PARAM;
+    q.hItem = nm->itemNew.hItem;
+    TreeView_GetItem(st->hTree, &q);
+    if (q.lParam != 0) return;  // already loaded or loading
+    q.lParam = 3;               // mark loading
+    TreeView_SetItem(st->hTree, &q);
+    fetchColumnsForNode(st, nm->itemNew.hItem);
+}
+
+void onTreeDoubleClick(AppState* st) {
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(st->hTree, &pt);
+    TVHITTESTINFO ht{};
+    ht.pt = pt;
+    HTREEITEM item = TreeView_HitTest(st->hTree, &ht);
+    if (item && !TreeView_GetParent(st->hTree, item)) {  // a table (top-level)
+        SetWindowTextW(st->hEdit, selectStatementFor(treeItemText(st->hTree, item)).c_str());
+        SetFocus(st->hEdit);
+    }
+}
+
+void onTreeContextMenu(AppState* st) {
+    POINT screen;
+    GetCursorPos(&screen);
+    POINT pt = screen;
+    ScreenToClient(st->hTree, &pt);
+    TVHITTESTINFO ht{};
+    ht.pt = pt;
+    HTREEITEM item = TreeView_HitTest(st->hTree, &ht);
+    if (!item || TreeView_GetParent(st->hTree, item)) return;  // tables only
+    TreeView_SelectItem(st->hTree, item);
+    st->contextTable = treeItemText(st->hTree, item);
+    HMENU pm = CreatePopupMenu();
+    AppendMenuW(pm, MF_STRING, ID_CTX_INSERT, L"Insert SELECT");
+    AppendMenuW(pm, MF_STRING, ID_CTX_PREVIEW, L"Preview rows (LIMIT 100)");
+    AppendMenuW(pm, MF_STRING, ID_CTX_COPY, L"Copy name");
+    TrackPopupMenu(pm, TPM_RIGHTBUTTON, screen.x, screen.y, 0, st->hwnd, nullptr);
+    DestroyMenu(pm);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -563,7 +792,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else if (id == ID_TX_ROLLBACK) doTransaction(st, L"ROLLBACK");
             else if (id == ID_HIST_UP) doHistoryUp(st);
             else if (id == ID_HIST_DOWN) doHistoryDown(st);
-            else if (id == ID_EXIT) DestroyWindow(hwnd);
+            else if (id == ID_REFRESH_SCHEMA) fetchTablesAsync(st);
+            else if (id == ID_CTX_INSERT) {
+                if (!st->contextTable.empty()) {
+                    SetWindowTextW(st->hEdit, selectStatementFor(st->contextTable).c_str());
+                    SetFocus(st->hEdit);
+                }
+            } else if (id == ID_CTX_PREVIEW) {
+                if (!st->contextTable.empty()) runText(st, selectStatementFor(st->contextTable), false);
+            } else if (id == ID_CTX_COPY) {
+                if (!st->contextTable.empty()) copyToClipboard(hwnd, st->contextTable);
+            } else if (id == ID_EXIT) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        case WM_NOTIFY: {
+            auto* nh = reinterpret_cast<NMHDR*>(lParam);
+            if (st && nh->idFrom == IDC_TREE) {
+                if (nh->code == TVN_ITEMEXPANDINGW) {
+                    onTreeExpand(st, reinterpret_cast<NMTREEVIEWW*>(lParam));
+                    return 0;
+                }
+                if (nh->code == NM_DBLCLK) {
+                    onTreeDoubleClick(st);
+                    return 0;
+                }
+                if (nh->code == NM_RCLICK) {
+                    onTreeContextMenu(st);
+                    return TRUE;
+                }
+            }
+            return 0;
+        }
+        case WM_APP_TABLES: {
+            auto* m = reinterpret_cast<TablesMsg*>(lParam);
+            populateTables(st, m->tables);
+            delete m;
+            return 0;
+        }
+        case WM_APP_COLUMNS: {
+            auto* m = reinterpret_cast<ColumnsMsg*>(lParam);
+            populateColumns(st, m->node, m->lines);
+            delete m;
             return 0;
         }
         case WM_APP_RESULT: {
@@ -591,6 +862,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
                 updateFlags(st);
+                fetchTablesAsync(st);
             } else {
                 MessageBoxW(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
@@ -632,6 +904,15 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     splitter.hCursor = LoadCursorW(nullptr, IDC_SIZENS);
     splitter.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     RegisterClassExW(&splitter);
+
+    WNDCLASSEXW vsplitter{};
+    vsplitter.cbSize = sizeof(vsplitter);
+    vsplitter.lpfnWndProc = VSplitterProc;
+    vsplitter.hInstance = hInstance;
+    vsplitter.lpszClassName = kVSplitterClass;
+    vsplitter.hCursor = LoadCursorW(nullptr, IDC_SIZEWE);
+    vsplitter.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    RegisterClassExW(&vsplitter);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
