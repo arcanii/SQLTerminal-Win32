@@ -152,7 +152,8 @@ add_executable(SQLTerminal WIN32
   src/WinMain.cpp
   src/ui/MainWindow.cpp
   src/ui/ConnectionDialog.cpp
-  src/ui/CellDetailDialog.cpp)
+  src/ui/CellDetailDialog.cpp
+  src/ui/HistoryDialog.cpp)
 target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore SqlStore SqlApp comctl32 comdlg32)
 sqlt_copy_pg_dlls(SQLTerminal)
 

@@ -63,6 +63,7 @@ public:
     void cancel();
 
     bool isConnected();
+    bool isSSLActive();
     std::wstring statusMessage();
 
 private:

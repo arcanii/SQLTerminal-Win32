@@ -121,6 +121,11 @@ bool DatabaseSession::isConnected() {
     return provider_ && provider_->isConnected();
 }
 
+bool DatabaseSession::isSSLActive() {
+    std::lock_guard<std::mutex> lk(connMutex_);
+    return provider_ && provider_->isSSLActive();
+}
+
 std::wstring DatabaseSession::statusMessage() {
     std::lock_guard<std::mutex> lk(connMutex_);
     return provider_ ? provider_->statusMessage() : std::wstring(L"Disconnected");

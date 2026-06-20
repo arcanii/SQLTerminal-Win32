@@ -35,6 +35,7 @@
 #include "security/CredentialStore.h"
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
+#include "ui/HistoryDialog.h"
 
 namespace sqlterm {
 namespace {
@@ -64,6 +65,8 @@ enum : int {
     ID_GRID_COPYROW = 1018,
     ID_GRID_TSV = 1019,
     ID_GRID_CSV = 1020,
+    ID_HISTORY = 1021,
+    ID_CONN_DETAILS = 1022,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -115,6 +118,7 @@ struct AppState {
     DatabaseEngine currentEngine = DatabaseEngine::Sqlite;
     bool readOnly = false;
     bool inTransaction = false;
+    bool sslActive = false;
     CommandHistory cmdHistory;
     std::vector<std::wstring> lastRunStatements;
 
@@ -214,11 +218,13 @@ void setStatus(AppState* st, const std::wstring& text) {
 
 void updateFlags(AppState* st) {
     std::wstring f;
-    if (st->readOnly) f += L"read-only";
-    if (st->inTransaction) {
+    auto add = [&](const wchar_t* s) {
         if (!f.empty()) f += L"  ·  ";
-        f += L"in transaction";
-    }
+        f += s;
+    };
+    if (st->sslActive) add(L"SSL");
+    if (st->readOnly) add(L"read-only");
+    if (st->inTransaction) add(L"in transaction");
     SendMessageW(st->hStatus, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(f.c_str()));
 }
 
@@ -522,6 +528,26 @@ void doOpen(AppState* st) {
     });
 }
 
+void doHistory(AppState* st) {
+    if (auto sql = showHistorySnippets(st->hwnd, editorText(st->hEdit)))
+        SetWindowTextW(st->hEdit, sql->c_str());
+}
+
+void doConnectionDetails(AppState* st) {
+    std::wstring m;
+    if (!st->session.isConnected()) {
+        m = L"Not connected.";
+    } else if (st->currentConnection.engine == DatabaseEngine::Postgres) {
+        const auto& c = st->currentConnection;
+        m = L"Engine:  PostgreSQL\nHost:  " + c.host + L"\nPort:  " + c.port + L"\nDatabase:  " +
+            c.databaseName + L"\nUser:  " + c.username + L"\nEncryption:  " +
+            (st->sslActive ? L"SSL/TLS" : L"none");
+    } else {
+        m = L"Engine:  SQLite\nFile:  " + st->currentConnection.filePath;
+    }
+    MessageBoxW(st->hwnd, m.c_str(), L"Connection Details", MB_OK | MB_ICONINFORMATION);
+}
+
 void createChildren(AppState* st, HINSTANCE hInst) {
     st->hList = CreateWindowExW(
         0, WC_LISTVIEW, L"",
@@ -572,6 +598,7 @@ void buildMenu(HWND hwnd) {
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
     AppendMenuW(file, MF_STRING, ID_OPEN, L"&Open Database…\tCtrl+O");
+    AppendMenuW(file, MF_STRING, ID_CONN_DETAILS, L"Connection &Details…");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, ID_EXIT, L"E&xit");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
@@ -588,6 +615,7 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(query, MF_STRING, ID_TX_ROLLBACK, L"Roll&back Transaction");
     AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(query, MF_STRING, ID_REFRESH_SCHEMA, L"Re&fresh Schema");
+    AppendMenuW(query, MF_STRING, ID_HISTORY, L"&History && Snippets…\tCtrl+R");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
     SetMenu(hwnd, bar);
 }
@@ -869,6 +897,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 copyToClipboard(hwnd, buildTsv(st->result.columns, displayRows(st)));
             } else if (id == ID_GRID_CSV) {
                 copyToClipboard(hwnd, buildCsv(st->result.columns, displayRows(st)));
+            } else if (id == ID_HISTORY) {
+                doHistory(st);
+            } else if (id == ID_CONN_DETAILS) {
+                doConnectionDetails(st);
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
@@ -979,12 +1011,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             auto* m = reinterpret_cast<ConnectMsg*>(lParam);
             if (m->ok) {
                 applyConnectionPersistence(st);
+                st->sslActive = st->session.isSSLActive();
                 clearGrid(st);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
                 updateFlags(st);
                 fetchTablesAsync(st);
             } else {
+                st->sslActive = false;
+                updateFlags(st);
                 MessageBoxW(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
             }
@@ -1058,6 +1093,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
         {FCONTROL | FVIRTKEY, VK_OEM_PERIOD, ID_CANCEL},
         {FCONTROL | FVIRTKEY, VK_UP, ID_HIST_UP},
         {FCONTROL | FVIRTKEY, VK_DOWN, ID_HIST_DOWN},
+        {FCONTROL | FVIRTKEY, static_cast<WORD>('R'), ID_HISTORY},
     };
     HACCEL hAccel = CreateAcceleratorTableW(accels, static_cast<int>(sizeof(accels) /
                                                                      sizeof(accels[0])));
