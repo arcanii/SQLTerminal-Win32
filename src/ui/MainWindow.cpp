@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "app/DotCommandHandler.h"
+#include "app/ResultFormat.h"
 #include "app/TerminalLogic.h"
 #include "core/SqlStatementSplitter.h"
 #include "core/SqlSyntaxHighlighter.h"
@@ -32,6 +33,7 @@
 #include "models/QueryResult.h"
 #include "persistence/Stores.h"
 #include "security/CredentialStore.h"
+#include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
 
 namespace sqlterm {
@@ -57,6 +59,11 @@ enum : int {
     ID_CTX_INSERT = 1013,
     ID_CTX_PREVIEW = 1014,
     ID_CTX_COPY = 1015,
+    ID_GRID_VIEW = 1016,
+    ID_GRID_COPYVAL = 1017,
+    ID_GRID_COPYROW = 1018,
+    ID_GRID_TSV = 1019,
+    ID_GRID_CSV = 1020,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -110,6 +117,14 @@ struct AppState {
     bool inTransaction = false;
     CommandHistory cmdHistory;
     std::vector<std::wstring> lastRunStatements;
+
+    // Results grid (virtual / owner-data).
+    QueryResult result;
+    int sortColumn = -1;
+    bool sortAscending = true;
+    std::vector<size_t> rowOrder;
+    int ctxRow = -1;
+    int ctxCol = -1;
 
     // Pending connect (applied on WM_APP_CONNECTED success).
     DatabaseConnection pendingConn;
@@ -259,48 +274,85 @@ void layout(AppState* st) {
     }
 }
 
-void clearGrid(HWND list) {
-    ListView_DeleteAllItems(list);
-    while (ListView_DeleteColumn(list, 0)) {
+void clearGrid(AppState* st) {
+    ListView_SetItemCount(st->hList, 0);
+    while (ListView_DeleteColumn(st->hList, 0)) {
+    }
+    st->result = QueryResult{};
+    st->rowOrder.clear();
+    st->sortColumn = -1;
+}
+
+// Cell value in *display* order (resolving the sort permutation), or "" out of range.
+const std::wstring& cellAt(AppState* st, int displayRow, int col) {
+    static const std::wstring empty;
+    if (displayRow < 0 || static_cast<size_t>(displayRow) >= st->rowOrder.size()) return empty;
+    const size_t src = st->rowOrder[static_cast<size_t>(displayRow)];
+    if (src >= st->result.rows.size()) return empty;
+    const auto& row = st->result.rows[src];
+    if (col < 0 || static_cast<size_t>(col) >= row.size()) return empty;
+    return row[static_cast<size_t>(col)];
+}
+
+std::wstring columnNameAt(AppState* st, int col) {
+    if (col >= 0 && static_cast<size_t>(col) < st->result.columns.size())
+        return st->result.columns[static_cast<size_t>(col)];
+    return L"col" + std::to_wstring(col);
+}
+
+std::vector<std::vector<std::wstring>> displayRows(AppState* st) {
+    std::vector<std::vector<std::wstring>> out;
+    out.reserve(st->rowOrder.size());
+    for (size_t d : st->rowOrder)
+        if (d < st->result.rows.size()) out.push_back(st->result.rows[d]);
+    return out;
+}
+
+void updateSortArrow(AppState* st) {
+    HWND header = ListView_GetHeader(st->hList);
+    const int n = Header_GetItemCount(header);
+    for (int i = 0; i < n; ++i) {
+        HDITEMW hi{};
+        hi.mask = HDI_FORMAT;
+        Header_GetItem(header, i, &hi);
+        hi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == st->sortColumn) hi.fmt |= (st->sortAscending ? HDF_SORTUP : HDF_SORTDOWN);
+        Header_SetItem(header, i, &hi);
     }
 }
 
-void populateGrid(HWND list, const QueryResult& r) {
-    SendMessageW(list, WM_SETREDRAW, FALSE, 0);
-    clearGrid(list);
+void setGridResult(AppState* st, const QueryResult& r) {
+    ListView_SetItemCount(st->hList, 0);
+    while (ListView_DeleteColumn(st->hList, 0)) {
+    }
+    st->result = r;
+    st->sortColumn = -1;
+    st->sortAscending = true;
+    st->rowOrder.resize(r.rows.size());
+    for (size_t i = 0; i < r.rows.size(); ++i) st->rowOrder[i] = i;
+
     for (size_t i = 0; i < r.columns.size(); ++i) {
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
         col.cx = 140;
         col.iSubItem = static_cast<int>(i);
         col.pszText = const_cast<LPWSTR>(r.columns[i].c_str());
-        ListView_InsertColumn(list, static_cast<int>(i), &col);
+        ListView_InsertColumn(st->hList, static_cast<int>(i), &col);
     }
-    for (size_t row = 0; row < r.rows.size(); ++row) {
-        const auto& cells = r.rows[row];
-        LVITEMW item{};
-        item.mask = LVIF_TEXT;
-        item.iItem = static_cast<int>(row);
-        item.pszText = cells.empty() ? const_cast<LPWSTR>(L"") : const_cast<LPWSTR>(cells[0].c_str());
-        ListView_InsertItem(list, &item);
-        for (size_t c = 1; c < cells.size(); ++c)
-            ListView_SetItemText(list, static_cast<int>(row), static_cast<int>(c),
-                                 const_cast<LPWSTR>(cells[c].c_str()));
-    }
+    ListView_SetItemCountEx(st->hList, static_cast<int>(r.rows.size()), LVSICF_NOINVALIDATEALL);
     for (size_t i = 0; i < r.columns.size(); ++i)
-        ListView_SetColumnWidth(list, static_cast<int>(i), LVSCW_AUTOSIZE_USEHEADER);
-    SendMessageW(list, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(list, nullptr, TRUE);
+        ListView_SetColumnWidth(st->hList, static_cast<int>(i), LVSCW_AUTOSIZE_USEHEADER);
+    InvalidateRect(st->hList, nullptr, TRUE);
 }
 
 void showResult(AppState* st, const QueryResult& r) {
     wchar_t buf[160];
     if (!r.columns.empty()) {
-        populateGrid(st->hList, r);
+        setGridResult(st, r);
         std::swprintf(buf, 160, L"%llu rows · %.0f ms",
                       static_cast<unsigned long long>(r.rows.size()), r.executionTimeSec * 1000.0);
     } else {
-        clearGrid(st->hList);
+        clearGrid(st);
         std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
                       r.executionTimeSec * 1000.0);
     }
@@ -382,7 +434,7 @@ void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool re
                 MessageBoxW(st->hwnd, dot->text.c_str(), L"SQLTerminal", MB_OK | MB_ICONINFORMATION);
                 break;
             case DotKind::Clear:
-                clearGrid(st->hList);
+                clearGrid(st);
                 setStatus(st, L"Cleared.");
                 break;
             case DotKind::Reconnect:
@@ -471,10 +523,10 @@ void doOpen(AppState* st) {
 }
 
 void createChildren(AppState* st, HINSTANCE hInst) {
-    st->hList = CreateWindowExW(0, WC_LISTVIEW, L"",
-                                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 0, 0, 0,
-                                st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
-                                hInst, nullptr);
+    st->hList = CreateWindowExW(
+        0, WC_LISTVIEW, L"",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA, 0, 0, 0, 0,
+        st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst, nullptr);
     ListView_SetExtendedListViewStyle(
         st->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
@@ -802,6 +854,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (!st->contextTable.empty()) runText(st, selectStatementFor(st->contextTable), false);
             } else if (id == ID_CTX_COPY) {
                 if (!st->contextTable.empty()) copyToClipboard(hwnd, st->contextTable);
+            } else if (id == ID_GRID_VIEW) {
+                showCellDetail(hwnd, columnNameAt(st, st->ctxCol), cellAt(st, st->ctxRow, st->ctxCol));
+            } else if (id == ID_GRID_COPYVAL) {
+                copyToClipboard(hwnd, cellAt(st, st->ctxRow, st->ctxCol));
+            } else if (id == ID_GRID_COPYROW) {
+                std::wstring line;
+                for (int c = 0; c < static_cast<int>(st->result.columns.size()); ++c) {
+                    if (c) line += L'\t';
+                    line += cellAt(st, st->ctxRow, c);
+                }
+                copyToClipboard(hwnd, line);
+            } else if (id == ID_GRID_TSV) {
+                copyToClipboard(hwnd, buildTsv(st->result.columns, displayRows(st)));
+            } else if (id == ID_GRID_CSV) {
+                copyToClipboard(hwnd, buildCsv(st->result.columns, displayRows(st)));
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
@@ -820,6 +887,60 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 if (nh->code == NM_RCLICK) {
                     onTreeContextMenu(st);
+                    return TRUE;
+                }
+            }
+            if (st && nh->idFrom == IDC_LIST) {
+                if (nh->code == LVN_GETDISPINFOW) {
+                    auto* di = reinterpret_cast<NMLVDISPINFOW*>(lParam);
+                    if (di->item.mask & LVIF_TEXT) {
+                        const std::wstring& v = cellAt(st, di->item.iItem, di->item.iSubItem);
+                        lstrcpynW(di->item.pszText, v.c_str(), di->item.cchTextMax);
+                    }
+                    return 0;
+                }
+                if (nh->code == LVN_COLUMNCLICK) {
+                    auto* nlv = reinterpret_cast<NMLISTVIEW*>(lParam);
+                    const int col = nlv->iSubItem;
+                    if (st->sortColumn == col)
+                        st->sortAscending = !st->sortAscending;
+                    else {
+                        st->sortColumn = col;
+                        st->sortAscending = true;
+                    }
+                    st->rowOrder = sortedRowOrder(st->result.rows, static_cast<size_t>(col),
+                                                  st->sortAscending);
+                    updateSortArrow(st);
+                    InvalidateRect(st->hList, nullptr, TRUE);
+                    return 0;
+                }
+                if (nh->code == NM_CUSTOMDRAW) {
+                    auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                    if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+                    if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                        cd->clrTextBk = (cd->nmcd.dwItemSpec % 2) ? RGB(245, 245, 245)
+                                                                  : GetSysColor(COLOR_WINDOW);
+                        return CDRF_DODEFAULT;
+                    }
+                    return CDRF_DODEFAULT;
+                }
+                if (nh->code == NM_RCLICK) {
+                    auto* ia = reinterpret_cast<NMITEMACTIVATE*>(lParam);
+                    if (ia->iItem >= 0) {
+                        st->ctxRow = ia->iItem;
+                        st->ctxCol = ia->iSubItem >= 0 ? ia->iSubItem : 0;
+                        POINT pt;
+                        GetCursorPos(&pt);
+                        HMENU pm = CreatePopupMenu();
+                        AppendMenuW(pm, MF_STRING, ID_GRID_VIEW, L"View value…");
+                        AppendMenuW(pm, MF_STRING, ID_GRID_COPYVAL, L"Copy value");
+                        AppendMenuW(pm, MF_STRING, ID_GRID_COPYROW, L"Copy row");
+                        AppendMenuW(pm, MF_SEPARATOR, 0, nullptr);
+                        AppendMenuW(pm, MF_STRING, ID_GRID_TSV, L"Copy all as TSV");
+                        AppendMenuW(pm, MF_STRING, ID_GRID_CSV, L"Copy all as CSV");
+                        TrackPopupMenu(pm, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+                        DestroyMenu(pm);
+                    }
                     return TRUE;
                 }
             }
@@ -858,7 +979,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             auto* m = reinterpret_cast<ConnectMsg*>(lParam);
             if (m->ok) {
                 applyConnectionPersistence(st);
-                clearGrid(st->hList);
+                clearGrid(st);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
                 updateFlags(st);
