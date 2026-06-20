@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WinSparkle appcast TEMPLATE for the Windows build. Publish this at the URL set
+  in src/platform/Updater.cpp (win_sparkle_set_appcast_url) and fill in real
+  release entries. Each enclosure must be EdDSA-signed with the private key whose
+  public key is set via win_sparkle_set_eddsa_public_key. Sign with the
+  sign_update tool from the WinSparkle distribution.
+-->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>SQLTerminal (Win32) Updates</title>
+    <link>https://raw.githubusercontent.com/arcanii/SQLTerminal-Win32/main/appcast.xml</link>
+    <description>Most recent updates to SQLTerminal for Windows</description>
+    <language>en</language>
+    <!--
+    <item>
+      <title>Version 0.1.0</title>
+      <sparkle:releaseNotesLink>https://github.com/arcanii/SQLTerminal-Win32/releases</sparkle:releaseNotesLink>
+      <pubDate>Mon, 01 Jun 2026 00:00:00 +0000</pubDate>
+      <enclosure url="https://github.com/arcanii/SQLTerminal-Win32/releases/download/v0.1.0/SQLTerminal-0.1.0-setup.exe"
+                 sparkle:version="0.1.0.0"
+                 sparkle:edSignature="REPLACE_WITH_EDDSA_SIGNATURE"
+                 length="0"
+                 type="application/octet-stream"/>
+    </item>
+    -->
+  </channel>
+</rss>

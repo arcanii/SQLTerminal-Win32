@@ -1,0 +1,38 @@
+# Build output
+/build/
+/out/
+[Bb]uild/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# vcpkg
+/vcpkg_installed/
+
+# Vendored prebuilt import libs are committed despite the *.lib rule above.
+!third_party/postgresql/lib/libpq.lib
+!third_party/winsparkle/lib/WinSparkle.lib
+
+# Visual Studio
+.vs/
+*.user
+
+# Local database / sample data (user data, not source)
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
