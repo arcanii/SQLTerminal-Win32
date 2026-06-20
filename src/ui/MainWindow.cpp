@@ -67,6 +67,10 @@ enum : int {
     ID_GRID_CSV = 1020,
     ID_HISTORY = 1021,
     ID_CONN_DETAILS = 1022,
+    ID_NEW = 1023,
+    ID_CLOSE = 1024,
+    ID_ABOUT = 1025,
+    ID_HELP = 1026,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -95,6 +99,10 @@ struct ColumnsMsg {
 constexpr int kSplitterHeight = 6;
 constexpr int kMinEditor = 80;
 constexpr int kMinList = 100;
+
+// Multi-window: one heap AppState per window; quit when the last one closes.
+int g_windowCount = 0;
+HINSTANCE g_appInstance = nullptr;
 
 struct AppState {
     HWND hwnd = nullptr;
@@ -597,9 +605,11 @@ void createChildren(AppState* st, HINSTANCE hInst) {
 void buildMenu(HWND hwnd) {
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
+    AppendMenuW(file, MF_STRING, ID_NEW, L"&New Window\tCtrl+N");
     AppendMenuW(file, MF_STRING, ID_OPEN, L"&Open Database…\tCtrl+O");
     AppendMenuW(file, MF_STRING, ID_CONN_DETAILS, L"Connection &Details…");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING, ID_CLOSE, L"&Close Window\tCtrl+W");
     AppendMenuW(file, MF_STRING, ID_EXIT, L"E&xit");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
 
@@ -617,6 +627,11 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(query, MF_STRING, ID_REFRESH_SCHEMA, L"Re&fresh Schema");
     AppendMenuW(query, MF_STRING, ID_HISTORY, L"&History && Snippets…\tCtrl+R");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
+
+    HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, ID_HELP, L"SQLTerminal &Help\tF1");
+    AppendMenuW(help, MF_STRING, ID_ABOUT, L"&About SQLTerminal");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
     SetMenu(hwnd, bar);
 }
 
@@ -833,6 +848,43 @@ void onTreeContextMenu(AppState* st) {
     DestroyMenu(pm);
 }
 
+HWND createMainWindow(int nCmdShow) {
+    auto* state = new AppState();
+    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 1100, 750, nullptr, nullptr, g_appInstance, state);
+    if (!hwnd) {
+        delete state;
+        return nullptr;
+    }
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+    return hwnd;
+}
+
+void doAbout(HWND hwnd) {
+    MessageBoxW(hwnd,
+                L"SQLTerminal (Win32)  0.1.0\n\n"
+                L"A native Windows SQL terminal for SQLite and PostgreSQL.\n"
+                L"Licensed under GPL-3.0.",
+                L"About SQLTerminal", MB_OK | MB_ICONINFORMATION);
+}
+
+void doHelp(HWND hwnd) {
+    MessageBoxW(hwnd,
+                L"Keyboard shortcuts\n"
+                L"  Ctrl+E          Run the whole editor\n"
+                L"  Ctrl+Enter      Run the statement at the cursor\n"
+                L"  Ctrl+.          Cancel the running query\n"
+                L"  Ctrl+Up/Down    Previous / next command\n"
+                L"  Ctrl+O          Open / connect\n"
+                L"  Ctrl+R          History & snippets\n"
+                L"  Ctrl+N          New window\n"
+                L"  Ctrl+W          Close window\n"
+                L"  F1              This help\n\n"
+                L"Type .help in the editor for SQL dot-commands (.tables, .schema, …).",
+                L"SQLTerminal Help", MB_OK | MB_ICONINFORMATION);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -841,6 +893,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             auto* state = reinterpret_cast<AppState*>(cs->lpCreateParams);
             state->hwnd = hwnd;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            ++g_windowCount;
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CREATE:
@@ -901,6 +954,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 doHistory(st);
             } else if (id == ID_CONN_DETAILS) {
                 doConnectionDetails(st);
+            } else if (id == ID_NEW) {
+                createMainWindow(SW_SHOW);
+            } else if (id == ID_CLOSE) {
+                DestroyWindow(hwnd);
+            } else if (id == ID_ABOUT) {
+                doAbout(hwnd);
+            } else if (id == ID_HELP) {
+                doHelp(hwnd);
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
@@ -1031,7 +1092,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_DESTROY:
             if (st && st->hMono) DeleteObject(st->hMono);
-            PostQuitMessage(0);
+            return 0;
+        case WM_NCDESTROY:
+            delete st;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            if (--g_windowCount <= 0) PostQuitMessage(0);
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1079,12 +1144,8 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassExW(&wc)) return 1;
 
-    AppState state;
-    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                CW_USEDEFAULT, 1100, 750, nullptr, nullptr, hInstance, &state);
-    if (!hwnd) return 1;
-    ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
+    g_appInstance = hInstance;
+    if (!createMainWindow(nCmdShow)) return 1;
 
     ACCEL accels[] = {
         {FCONTROL | FVIRTKEY, static_cast<WORD>('E'), ID_RUN},
@@ -1094,13 +1155,17 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
         {FCONTROL | FVIRTKEY, VK_UP, ID_HIST_UP},
         {FCONTROL | FVIRTKEY, VK_DOWN, ID_HIST_DOWN},
         {FCONTROL | FVIRTKEY, static_cast<WORD>('R'), ID_HISTORY},
+        {FCONTROL | FVIRTKEY, static_cast<WORD>('N'), ID_NEW},
+        {FCONTROL | FVIRTKEY, static_cast<WORD>('W'), ID_CLOSE},
+        {FVIRTKEY, VK_F1, ID_HELP},
     };
     HACCEL hAccel = CreateAcceleratorTableW(accels, static_cast<int>(sizeof(accels) /
                                                                      sizeof(accels[0])));
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!TranslateAcceleratorW(hwnd, hAccel, &msg)) {
+        HWND active = GetActiveWindow();
+        if (!active || !TranslateAcceleratorW(active, hAccel, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
