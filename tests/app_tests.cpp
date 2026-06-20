@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "app/DotCommandHandler.h"
+#include "app/ResultFormat.h"
 #include "app/TerminalLogic.h"
 #include "test_harness.h"
 
@@ -18,6 +19,14 @@ using std::wstring;
 static std::string dbg(const wstring& w) { return "\"" + th::narrow(w) + "\""; }
 static std::string dbg(const optional<wstring>& o) {
     return o ? ("Some(" + dbg(*o) + ")") : std::string("None");
+}
+static std::string dbg(const vector<size_t>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) s += ", ";
+        s += std::to_string(v[i]);
+    }
+    return s + "]";
 }
 static bool has(const wstring& s, const wstring& sub) { return s.find(sub) != wstring::npos; }
 
@@ -126,6 +135,42 @@ TEST(schema_sql_and_identifiers) {
     CHECK(has(tableNamesSql(DatabaseEngine::Sqlite), L"NOT LIKE 'sqlite_%'"));
     CHECK_EQ(columnsSql(DatabaseEngine::Sqlite, L"t"), wstring(L"PRAGMA table_info('t');"));
     CHECK(has(columnsSql(DatabaseEngine::Postgres, L"o'brien"), L"'o''brien'"));
+}
+
+// ===== result formatting =====================================================
+
+TEST(smart_compare_numeric_null_natural) {
+    CHECK(smartCompare(L"2", L"10") < 0);     // numeric, not lexical
+    CHECK(smartCompare(L"10", L"2") > 0);
+    CHECK(smartCompare(L"5", L"5") == 0);
+    CHECK(smartCompare(L"NULL", L"x") > 0);   // NULL sorts last
+    CHECK(smartCompare(L"x", L"NULL") < 0);
+    CHECK(smartCompare(L"apple", L"banana") < 0);
+    CHECK(smartCompare(L"item2", L"item10") < 0);  // natural
+}
+
+TEST(sorted_row_order_stable_null_last) {
+    const vector<vector<wstring>> rows = {{L"10"}, {L"2"}, {L"NULL"}, {L"1"}};
+    CHECK_EQ(sortedRowOrder(rows, 0, true), (vector<size_t>{3, 1, 0, 2}));
+    CHECK_EQ(sortedRowOrder(rows, 0, false), (vector<size_t>{2, 0, 1, 3}));
+}
+
+TEST(csv_escape_and_export) {
+    CHECK_EQ(csvEscape(L"plain"), wstring(L"plain"));
+    CHECK_EQ(csvEscape(L"a,b"), wstring(L"\"a,b\""));
+    CHECK_EQ(csvEscape(L"a\"b"), wstring(L"\"a\"\"b\""));
+    CHECK_EQ(buildTsv({L"a", L"b"}, {{L"1", L"2"}, {L"3", L"4"}}),
+             wstring(L"a\tb\n1\t2\n3\t4"));
+    CHECK_EQ(buildCsv({L"a", L"b"}, {{L"1,5", L"x"}}), wstring(L"a,b\n\"1,5\",x"));
+}
+
+TEST(pretty_json) {
+    auto p = prettyPrintJson(L"{\"b\":1,\"a\":2}");
+    CHECK(p.has_value());
+    CHECK(has(*p, L"\"a\": 2"));
+    CHECK(p->find(L"\"a\"") < p->find(L"\"b\""));  // keys sorted
+    CHECK(!prettyPrintJson(L"not json").has_value());
+    CHECK(prettyPrintJson(L"[1, 2, 3]").has_value());
 }
 
 int main() {

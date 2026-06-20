@@ -83,8 +83,10 @@ target_link_libraries(SqlDb PUBLIC sqlite3 SqlCore PostgreSQL::PostgreSQL)
 # ---------------------------------------------------------------------------
 add_library(SqlApp STATIC
   src/app/DotCommandHandler.cpp
-  src/app/TerminalLogic.cpp)
+  src/app/TerminalLogic.cpp
+  src/app/ResultFormat.cpp)
 target_include_directories(SqlApp PUBLIC src)
+target_include_directories(SqlApp PRIVATE third_party/json)
 target_link_libraries(SqlApp PUBLIC SqlCore)
 
 # ---------------------------------------------------------------------------
