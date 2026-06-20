@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "db/DatabaseProvider.h"
+#include "db/PostgresProvider.h"
 #include "db/SqliteProvider.h"
 #include "models/DatabaseEngine.h"
 
@@ -16,7 +17,7 @@ inline std::unique_ptr<DatabaseProvider> makeProvider(DatabaseEngine engine) {
         case DatabaseEngine::Sqlite:
             return std::make_unique<SqliteProvider>();
         case DatabaseEngine::Postgres:
-            return nullptr;  // P4
+            return std::make_unique<PostgresProvider>();
     }
     return nullptr;
 }

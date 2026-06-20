@@ -19,6 +19,9 @@ compile_commands.json
 # vcpkg
 /vcpkg_installed/
 
+# Vendored prebuilt libpq import lib is committed despite the *.lib rule above.
+!third_party/postgresql/lib/libpq.lib
+
 # Visual Studio
 .vs/
 *.user

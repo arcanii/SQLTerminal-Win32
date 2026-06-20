@@ -42,13 +42,40 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
-# SqlDb — engine providers (SqliteProvider now; PostgresProvider in P4).
+# libpq (PostgreSQL client) — vendored prebuilt binaries (EDB), like sqlite3.
+# No vcpkg/build-from-source. Exposed as the PostgreSQL::PostgreSQL imported
+# target; PG_RUNTIME_DLLS are copied next to each exe that links it.
+# ---------------------------------------------------------------------------
+set(PG_DIR "${CMAKE_SOURCE_DIR}/third_party/postgresql")
+add_library(PostgreSQL::PostgreSQL SHARED IMPORTED)
+set_target_properties(PostgreSQL::PostgreSQL PROPERTIES
+  IMPORTED_IMPLIB "${PG_DIR}/lib/libpq.lib"
+  IMPORTED_LOCATION "${PG_DIR}/bin/libpq.dll"
+  INTERFACE_INCLUDE_DIRECTORIES "${PG_DIR}/include")
+set(PG_RUNTIME_DLLS
+  "${PG_DIR}/bin/libpq.dll"
+  "${PG_DIR}/bin/libcrypto-3-x64.dll"
+  "${PG_DIR}/bin/libssl-3-x64.dll"
+  "${PG_DIR}/bin/libintl-9.dll"
+  "${PG_DIR}/bin/libiconv-2.dll"
+  "${PG_DIR}/bin/libwinpthread-1.dll")
+
+# Copy the libpq runtime DLLs next to an executable target so it runs in place.
+function(sqlt_copy_pg_dlls target)
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PG_RUNTIME_DLLS} "$<TARGET_FILE_DIR:${target}>"
+    COMMAND_EXPAND_LISTS)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# SqlDb — engine providers (SqliteProvider, PostgresProvider) + DatabaseSession.
 # ---------------------------------------------------------------------------
 add_library(SqlDb STATIC
   src/db/SqliteProvider.cpp
+  src/db/PostgresProvider.cpp
   src/db/DatabaseSession.cpp)
 target_include_directories(SqlDb PUBLIC src)
-target_link_libraries(SqlDb PUBLIC sqlite3)
+target_link_libraries(SqlDb PUBLIC sqlite3 SqlCore PostgreSQL::PostgreSQL)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -70,6 +97,22 @@ target_link_libraries(SqlSessionTests PRIVATE SqlDb)
 target_include_directories(SqlSessionTests PRIVATE tests)
 add_test(NAME SqlSessionTests COMMAND SqlSessionTests)
 
+# Pure conninfo builder test — no libpq, no server.
+add_executable(PgConnInfoTests tests/postgres_conninfo_tests.cpp)
+target_include_directories(PgConnInfoTests PRIVATE src tests)
+add_test(NAME PgConnInfoTests COMMAND PgConnInfoTests)
+
+# Live PostgreSQL integration test — self-skips unless SQLT_PG_HOST is set.
+add_executable(PostgresLiveTest tests/postgres_live_test.cpp)
+target_link_libraries(PostgresLiveTest PRIVATE SqlDb)
+target_include_directories(PostgresLiveTest PRIVATE tests)
+add_test(NAME PostgresLiveTest COMMAND PostgresLiveTest)
+
+# Test exes that link SqlDb (-> libpq) need the libpq DLLs alongside them.
+sqlt_copy_pg_dlls(SqlDbTests)
+sqlt_copy_pg_dlls(SqlSessionTests)
+sqlt_copy_pg_dlls(PostgresLiveTest)
+
 # ---------------------------------------------------------------------------
 # SQLTerminal — the Win32 GUI app.
 # ---------------------------------------------------------------------------
@@ -77,6 +120,7 @@ add_executable(SQLTerminal WIN32
   src/WinMain.cpp
   src/ui/MainWindow.cpp)
 target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore comctl32 comdlg32)
+sqlt_copy_pg_dlls(SQLTerminal)
 
 # Future phases (P4) will add find_package(PostgreSQL)/libpq + nlohmann_json via
 # the vcpkg toolchain (declared in vcpkg.json).
