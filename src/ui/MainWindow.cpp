@@ -11,6 +11,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <windowsx.h>
 
 #define _RICHEDIT_VER 0x0500
 #include <richedit.h>
@@ -48,6 +49,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"SQLTerminalMainWindow";
 constexpr wchar_t kSplitterClass[] = L"SQLTerminalSplitter";
 constexpr wchar_t kVSplitterClass[] = L"SQLTerminalVSplitter";
+constexpr wchar_t kCmdBarClass[] = L"SQLTerminalCmdBar";
 
 enum : int {
     ID_OPEN = 1001,
@@ -77,6 +79,7 @@ enum : int {
     ID_ABOUT = 1025,
     ID_HELP = 1026,
     ID_CHECK_UPDATES = 1027,
+    ID_MENU = 1028,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -105,6 +108,7 @@ struct ColumnsMsg {
 constexpr int kSplitterHeight = 6;
 constexpr int kMinEditor = 80;
 constexpr int kMinList = 100;
+constexpr int kCmdBarH = 46;
 
 // Multi-window: one heap AppState per window; quit when the last one closes.
 int g_windowCount = 0;
@@ -120,6 +124,9 @@ struct AppState {
     HWND hVSplitter = nullptr;
     HFONT hMono = nullptr;
     HFONT hUi = nullptr;
+    HFONT hGlyph = nullptr;     // Segoe MDL2 Assets, for command-bar icons
+    HWND hCmdBar = nullptr;     // custom top command bar (replaces the menu)
+    int cmdHover = -1;          // hovered command-bar button index, or -1
     std::wstring statusMsg;   // owner-drawn status bar, left part
     std::wstring flagsText;   // owner-drawn status bar, right part (SSL/read-only/tx)
     int editorHeight = 150;
@@ -271,7 +278,10 @@ void layout(AppState* st) {
     RECT rc;
     GetClientRect(st->hwnd, &rc);
     const int cw = rc.right;
-    const int ch = (std::max)(0L, static_cast<long>(rc.bottom - statusHeight(st)));
+    const int top = kCmdBarH;
+    const int ch = (std::max)(0, static_cast<int>(rc.bottom) - statusHeight(st) - top);
+
+    if (st->hCmdBar) MoveWindow(st->hCmdBar, 0, 0, cw, kCmdBarH, TRUE);
 
     // Left: schema sidebar (tree) + vertical splitter.
     const int vsW = kSplitterHeight;
@@ -282,8 +292,8 @@ void layout(AppState* st) {
     if (sw < 0) sw = 0;
     const int rx = sw + vsW;
     const int rw = (std::max)(0, cw - rx);
-    MoveWindow(st->hTree, 0, 0, sw, ch, TRUE);
-    MoveWindow(st->hVSplitter, sw, 0, vsW, ch, TRUE);
+    MoveWindow(st->hTree, 0, top, sw, ch, TRUE);
+    MoveWindow(st->hVSplitter, sw, top, vsW, ch, TRUE);
 
     // Right: results / horizontal splitter / editor.
     int editH = st->editorHeight;
@@ -294,12 +304,12 @@ void layout(AppState* st) {
     int listH = ch - editH - kSplitterHeight;
     if (listH < 0) listH = 0;
 
-    MoveWindow(st->hList, rx, 0, rw, listH, TRUE);
-    MoveWindow(st->hSplitter, rx, listH, rw, kSplitterHeight, TRUE);
-    MoveWindow(st->hEdit, rx, listH + kSplitterHeight, rw, editH, TRUE);
+    MoveWindow(st->hList, rx, top, rw, listH, TRUE);
+    MoveWindow(st->hSplitter, rx, top + listH, rw, kSplitterHeight, TRUE);
+    MoveWindow(st->hEdit, rx, top + listH + kSplitterHeight, rw, editH, TRUE);
 
     if (st->hStatus) {
-        int parts[2] = {cw - 180, -1};
+        int parts[2] = {cw - 220, -1};
         SendMessageW(st->hStatus, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
         updateFlags(st);
     }
@@ -393,6 +403,7 @@ void showResult(AppState* st, const QueryResult& r) {
 void startExecute(AppState* st, const std::wstring& sql) {
     st->busy = true;
     st->cancelRequested = false;
+    if (st->hCmdBar) InvalidateRect(st->hCmdBar, nullptr, FALSE);
     setStatus(st, L"Running…  (Ctrl+. to cancel)");
     HWND hwnd = st->hwnd;
     st->session.executeAsync(sql, [hwnd](QueryResult r) {
@@ -441,7 +452,7 @@ void guardAndRun(AppState* st, const std::vector<std::wstring>& statements) {
 
 void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool recordHistory = true) {
     if (!st->session.isConnected()) {
-        setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
+        setStatus(st, L"No database — press Ctrl+O to connect.");
         return;
     }
     if (st->busy) {
@@ -508,8 +519,7 @@ void doHistoryDown(AppState* st) {
 
 void toggleReadOnly(AppState* st) {
     st->readOnly = !st->readOnly;
-    CheckMenuItem(GetMenu(st->hwnd), ID_READONLY, st->readOnly ? MF_CHECKED : MF_UNCHECKED);
-    updateFlags(st);
+    updateFlags(st);  // checkmark is set when the popup menu is built
 }
 
 void applyConnectionPersistence(AppState* st) {
@@ -581,6 +591,9 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     st->hMono = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                             FIXED_PITCH | FF_MODERN, L"Consolas");
+    st->hGlyph = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
 
     st->hList = CreateWindowExW(
         0, WC_LISTVIEW, L"",
@@ -634,42 +647,243 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                   st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                   hInst, nullptr);
-    setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
+
+    st->hCmdBar = CreateWindowExW(0, kCmdBarClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, st->hwnd,
+                                  nullptr, hInst, nullptr);
+    SetWindowLongPtrW(st->hCmdBar, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+
+    setStatus(st, L"Connect a database to begin — Ctrl+O");
 }
 
-void buildMenu(HWND hwnd) {
-    HMENU bar = CreateMenu();
+// ---- dark popup menus -------------------------------------------------------
+// uxtheme's dark-mode entry points are exported by ordinal only (undocumented,
+// but stable since Win10 1809 and the standard way apps get dark menus). Every
+// call is guarded — if the export is missing, menus simply stay light.
+void enableDarkMenus() {
+    HMODULE ux = GetModuleHandleW(L"uxtheme.dll");
+    if (!ux) return;
+    using SetPreferredAppModeFn = int(WINAPI*)(int);
+    using FlushMenuThemesFn = void(WINAPI*)();
+    auto setMode = reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(ux, MAKEINTRESOURCEA(135)));
+    auto flush = reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(ux, MAKEINTRESOURCEA(136)));
+    if (setMode) setMode(1);  // AllowDark: menus follow the system theme
+    if (flush) flush();
+}
+
+void allowDarkForWindow(HWND hwnd) {
+    HMODULE ux = GetModuleHandleW(L"uxtheme.dll");
+    if (!ux) return;
+    using AllowDarkFn = BOOL(WINAPI*)(HWND, BOOL);
+    auto allow = reinterpret_cast<AllowDarkFn>(GetProcAddress(ux, MAKEINTRESOURCEA(133)));
+    if (allow) allow(hwnd, TRUE);
+}
+
+// The full menu now lives behind the command-bar hamburger as a popup.
+HMENU buildMenuPopup(AppState* st) {
     HMENU file = CreatePopupMenu();
-    AppendMenuW(file, MF_STRING, ID_NEW, L"&New Window\tCtrl+N");
-    AppendMenuW(file, MF_STRING, ID_OPEN, L"&Open Database…\tCtrl+O");
-    AppendMenuW(file, MF_STRING, ID_CONN_DETAILS, L"Connection &Details…");
+    AppendMenuW(file, MF_STRING, ID_NEW, L"New Window\tCtrl+N");
+    AppendMenuW(file, MF_STRING, ID_OPEN, L"Open Database…\tCtrl+O");
+    AppendMenuW(file, MF_STRING, ID_CONN_DETAILS, L"Connection Details…");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, ID_CLOSE, L"&Close Window\tCtrl+W");
-    AppendMenuW(file, MF_STRING, ID_EXIT, L"E&xit");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
+    AppendMenuW(file, MF_STRING, ID_CLOSE, L"Close Window\tCtrl+W");
+    AppendMenuW(file, MF_STRING, ID_EXIT, L"Exit");
 
     HMENU query = CreatePopupMenu();
-    AppendMenuW(query, MF_STRING, ID_RUN, L"&Run\tCtrl+E");
-    AppendMenuW(query, MF_STRING, ID_RUN_STMT, L"Run &Statement at Cursor\tCtrl+Enter");
-    AppendMenuW(query, MF_STRING, ID_CANCEL, L"&Cancel Running Query\tCtrl+.");
+    AppendMenuW(query, MF_STRING, ID_RUN, L"Run\tCtrl+E");
+    AppendMenuW(query, MF_STRING, ID_RUN_STMT, L"Run Statement at Cursor\tCtrl+Enter");
+    AppendMenuW(query, MF_STRING, ID_CANCEL, L"Cancel Running Query\tCtrl+.");
     AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(query, MF_STRING, ID_READONLY, L"Read-&only mode");
+    AppendMenuW(query, MF_STRING | (st->readOnly ? MF_CHECKED : MF_UNCHECKED), ID_READONLY,
+                L"Read-only mode");
     AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(query, MF_STRING, ID_TX_BEGIN, L"&Begin Transaction");
-    AppendMenuW(query, MF_STRING, ID_TX_COMMIT, L"Co&mmit Transaction");
-    AppendMenuW(query, MF_STRING, ID_TX_ROLLBACK, L"Roll&back Transaction");
+    AppendMenuW(query, MF_STRING, ID_TX_BEGIN, L"Begin Transaction");
+    AppendMenuW(query, MF_STRING, ID_TX_COMMIT, L"Commit Transaction");
+    AppendMenuW(query, MF_STRING, ID_TX_ROLLBACK, L"Rollback Transaction");
     AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(query, MF_STRING, ID_REFRESH_SCHEMA, L"Re&fresh Schema");
-    AppendMenuW(query, MF_STRING, ID_HISTORY, L"&History && Snippets…\tCtrl+R");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
+    AppendMenuW(query, MF_STRING, ID_REFRESH_SCHEMA, L"Refresh Schema");
+    AppendMenuW(query, MF_STRING, ID_HISTORY, L"History && Snippets…\tCtrl+R");
 
     HMENU help = CreatePopupMenu();
-    AppendMenuW(help, MF_STRING, ID_CHECK_UPDATES, L"Check for &Updates…");
-    AppendMenuW(help, MF_STRING, ID_HELP, L"SQLTerminal &Help\tF1");
+    AppendMenuW(help, MF_STRING, ID_CHECK_UPDATES, L"Check for Updates…");
+    AppendMenuW(help, MF_STRING, ID_HELP, L"SQLTerminal Help\tF1");
     AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(help, MF_STRING, ID_ABOUT, L"&About SQLTerminal");
-    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
-    SetMenu(hwnd, bar);
+    AppendMenuW(help, MF_STRING, ID_ABOUT, L"About SQLTerminal");
+
+    HMENU root = CreatePopupMenu();
+    AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"File");
+    AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"Query");
+    AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"Help");
+    return root;
+}
+
+void showMainMenu(AppState* st) {
+    HMENU m = buildMenuPopup(st);
+    RECT rc;
+    GetWindowRect(st->hCmdBar, &rc);
+    TrackPopupMenu(m, TPM_LEFTBUTTON, rc.left + 8, rc.bottom, 0, st->hwnd, nullptr);
+    DestroyMenu(m);  // also frees the appended submenus
+}
+
+// ---- command bar ------------------------------------------------------------
+struct CmdItem {
+    int id;
+    const wchar_t* glyph;   // Segoe MDL2 Assets codepoint
+    const wchar_t* label;   // non-null = wider labelled (primary) button
+    bool accent;            // coral pill
+};
+const CmdItem kCmdItems[] = {
+    {ID_MENU, L"", nullptr, false},
+    {ID_RUN, L"", L"Run", true},
+    {ID_OPEN, L"", nullptr, false},
+    {ID_REFRESH_SCHEMA, L"", nullptr, false},
+    {ID_HISTORY, L"", nullptr, false},
+};
+constexpr int kCmdCount = static_cast<int>(sizeof(kCmdItems) / sizeof(kCmdItems[0]));
+
+void cmdRects(HWND bar, RECT btn[kCmdCount], RECT* chip) {
+    RECT rc;
+    GetClientRect(bar, &rc);
+    int x = 10;
+    for (int i = 0; i < kCmdCount; ++i) {
+        const int w = kCmdItems[i].label ? 78 : 38;
+        btn[i] = {x, 7, x + w, rc.bottom - 8};
+        x += w + 6;
+    }
+    const int chipW = 196;
+    *chip = {rc.right - chipW - 10, 8, rc.right - 10, rc.bottom - 9};
+}
+
+void fillRound(HDC dc, const RECT& r, COLORREF fill, COLORREF edge, int radius) {
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN p = edge ? CreatePen(PS_SOLID, 1, edge) : nullptr;
+    HGDIOBJ ob = SelectObject(dc, b);
+    HGDIOBJ op = SelectObject(dc, p ? p : GetStockObject(NULL_PEN));
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(b);
+    if (p) DeleteObject(p);
+}
+
+LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HDC dc = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HGDIOBJ obmp = SelectObject(dc, bmp);
+            const Theme& th = currentTheme();
+
+            HBRUSH bg = CreateSolidBrush(th.panelElevBg);
+            FillRect(dc, &rc, bg);
+            DeleteObject(bg);
+            HPEN line = CreatePen(PS_SOLID, 1, th.border);
+            HGDIOBJ ol = SelectObject(dc, line);
+            MoveToEx(dc, 0, rc.bottom - 1, nullptr);
+            LineTo(dc, rc.right, rc.bottom - 1);
+            SelectObject(dc, ol);
+            DeleteObject(line);
+            SetBkMode(dc, TRANSPARENT);
+
+            RECT btn[kCmdCount];
+            RECT chip;
+            cmdRects(hwnd, btn, &chip);
+            const bool busy = st && st->busy;
+            for (int i = 0; i < kCmdCount; ++i) {
+                const CmdItem& it = kCmdItems[i];
+                const bool hov = st && st->cmdHover == i;
+                if (it.accent)
+                    fillRound(dc, btn[i], busy ? th.hoverBg : th.accent, 0, 8);
+                else if (hov)
+                    fillRound(dc, btn[i], th.hoverBg, 0, 8);
+
+                const COLORREF fg = it.accent ? (busy ? th.textMuted : th.accentText)
+                                              : (hov ? th.textPrimary : th.textSecondary);
+                RECT gr = btn[i];
+                if (it.label) gr.right = gr.left + 30;
+                SelectObject(dc, st->hGlyph);
+                SetTextColor(dc, fg);
+                DrawTextW(dc, it.glyph, -1, &gr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+                if (it.label) {
+                    RECT lr = btn[i];
+                    lr.left += 30;
+                    SelectObject(dc, st->hUi);
+                    SetTextColor(dc, fg);
+                    DrawTextW(dc, it.label, -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
+                }
+            }
+
+            const bool connected = st && st->session.isConnected();
+            fillRound(dc, chip, th.panelBg, th.border, 8);
+            const int cy = (chip.top + chip.bottom) / 2;
+            HBRUSH db = CreateSolidBrush(connected ? RGB(61, 220, 132) : th.textMuted);
+            HGDIOBJ odb = SelectObject(dc, db);
+            HGDIOBJ opn = SelectObject(dc, GetStockObject(NULL_PEN));
+            Ellipse(dc, chip.left + 12, cy - 4, chip.left + 20, cy + 4);
+            SelectObject(dc, odb);
+            SelectObject(dc, opn);
+            DeleteObject(db);
+            RECT cr = chip;
+            cr.left += 28;
+            cr.right -= 10;
+            SelectObject(dc, st->hUi);
+            SetTextColor(dc, connected ? th.textPrimary : th.textSecondary);
+            const std::wstring chipText =
+                connected ? (st->dbName.empty() ? L"connected" : st->dbName) : L"Connect a database…";
+            DrawTextW(dc, chipText.c_str(), -1, &cr,
+                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, obmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            RECT btn[kCmdCount];
+            RECT chip;
+            cmdRects(hwnd, btn, &chip);
+            int hov = -1;
+            for (int i = 0; i < kCmdCount; ++i)
+                if (PtInRect(&btn[i], pt)) hov = i;
+            if (st && hov != st->cmdHover) {
+                st->cmdHover = hov;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (st && st->cmdHover != -1) {
+                st->cmdHover = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            RECT btn[kCmdCount];
+            RECT chip;
+            cmdRects(hwnd, btn, &chip);
+            for (int i = 0; i < kCmdCount; ++i) {
+                if (PtInRect(&btn[i], pt)) {
+                    SendMessageW(st->hwnd, WM_COMMAND, MAKEWPARAM(kCmdItems[i].id, 0), 0);
+                    return 0;
+                }
+            }
+            if (PtInRect(&chip, pt)) SendMessageW(st->hwnd, WM_COMMAND, MAKEWPARAM(ID_OPEN, 0), 0);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -706,9 +920,10 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 ScreenToClient(st->hwnd, &pt);
                 RECT rc;
                 GetClientRect(st->hwnd, &rc);
-                const int ch = (std::max)(0L, static_cast<long>(rc.bottom - statusHeight(st)));
-                int newEdit = ch - kSplitterHeight - pt.y;
-                int maxEdit = ch - kMinList - kSplitterHeight;
+                const int contentBottom = static_cast<int>(rc.bottom) - statusHeight(st);
+                const int contentH = (std::max)(0, contentBottom - kCmdBarH);
+                int newEdit = contentBottom - kSplitterHeight - pt.y;
+                int maxEdit = contentH - kMinList - kSplitterHeight;
                 if (maxEdit < kMinEditor) maxEdit = kMinEditor;
                 if (newEdit < kMinEditor) newEdit = kMinEditor;
                 if (newEdit > maxEdit) newEdit = maxEdit;
@@ -976,8 +1191,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CREATE:
+            allowDarkForWindow(hwnd);
             createChildren(st, reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance);
-            buildMenu(hwnd);
             layout(st);
             applyDarkTitleBar(hwnd);
             return 0;
@@ -998,6 +1213,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int code = HIWORD(wParam);
             if (reinterpret_cast<HWND>(lParam) == st->hEdit && code == EN_CHANGE)
                 applyHighlight(st);
+            else if (id == ID_MENU) showMainMenu(st);
             else if (id == ID_OPEN) doOpen(st);
             else if (id == ID_RUN) doRunWhole(st);
             else if (id == ID_RUN_STMT) doRunStatement(st);
@@ -1174,6 +1390,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_APP_RESULT: {
             auto* r = reinterpret_cast<QueryResult*>(lParam);
             st->busy = false;
+            if (st->hCmdBar) InvalidateRect(st->hCmdBar, nullptr, FALSE);
             if (st->cancelRequested) {
                 setStatus(st, L"Query cancelled.");
             } else {
@@ -1204,6 +1421,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 MessageBoxW(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
             }
+            if (st->hCmdBar) InvalidateRect(st->hCmdBar, nullptr, FALSE);
             delete m;
             return 0;
         }
@@ -1213,6 +1431,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DESTROY:
             if (st && st->hMono) DeleteObject(st->hMono);
             if (st && st->hUi) DeleteObject(st->hUi);
+            if (st && st->hGlyph) DeleteObject(st->hGlyph);
             return 0;
         case WM_NCDESTROY:
             delete st;
@@ -1231,6 +1450,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     icc.dwICC = ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES |
                 ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
+    enableDarkMenus();
 
     if (!LoadLibraryW(L"Msftedit.dll")) {
         MessageBoxW(nullptr, L"Failed to load Msftedit.dll (RichEdit).", L"SQLTerminal",
@@ -1255,6 +1475,15 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     vsplitter.hCursor = LoadCursorW(nullptr, IDC_SIZEWE);
     vsplitter.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     RegisterClassExW(&vsplitter);
+
+    WNDCLASSEXW cmdbar{};
+    cmdbar.cbSize = sizeof(cmdbar);
+    cmdbar.lpfnWndProc = CmdBarProc;
+    cmdbar.hInstance = hInstance;
+    cmdbar.lpszClassName = kCmdBarClass;
+    cmdbar.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cmdbar.hbrBackground = nullptr;
+    RegisterClassExW(&cmdbar);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
