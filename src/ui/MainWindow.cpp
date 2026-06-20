@@ -18,7 +18,7 @@
 
 #include "core/SqlStatementSplitter.h"
 #include "core/SqlSyntaxHighlighter.h"
-#include "db/SqliteProvider.h"
+#include "db/DatabaseSession.h"
 #include "models/DatabaseConnection.h"
 #include "models/QueryResult.h"
 
@@ -33,10 +33,21 @@ enum : int {
     ID_EXIT = 1002,
     ID_RUN = 1003,
     ID_RUN_STMT = 1004,
+    ID_CANCEL = 1005,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
     IDC_STATUS = 2005,
+};
+
+// Worker-thread results are marshalled to the UI thread via these messages; the
+// LPARAM is a heap payload owned by (and freed in) the handler.
+constexpr UINT WM_APP_RESULT = WM_APP + 1;     // lParam = QueryResult*
+constexpr UINT WM_APP_CONNECTED = WM_APP + 2;  // lParam = ConnectMsg*
+
+struct ConnectMsg {
+    bool ok;
+    std::wstring error;
 };
 
 constexpr int kSplitterHeight = 6;
@@ -51,8 +62,11 @@ struct AppState {
     HWND hStatus = nullptr;
     int editorHeight = 150;   // user-draggable
     bool suppressHighlight = false;
-    SqliteProvider provider;
+    bool busy = false;            // a query is in flight
+    bool cancelRequested = false; // user hit Ctrl+. for the in-flight query
+    DatabaseSession session;
     std::wstring dbName;
+    std::wstring pendingPath;     // path being connected to
 };
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
@@ -201,12 +215,7 @@ void populateGrid(HWND list, const QueryResult& r) {
     InvalidateRect(list, nullptr, TRUE);
 }
 
-void doExecute(AppState* st, const std::wstring& sql) {
-    const QueryResult r = st->provider.execute(sql);
-    if (r.error) {
-        setStatus(st, L"Error: " + *r.error);
-        return;
-    }
+void showResult(AppState* st, const QueryResult& r) {
     wchar_t buf[160];
     if (!r.columns.empty()) {
         populateGrid(st->hList, r);
@@ -221,29 +230,60 @@ void doExecute(AppState* st, const std::wstring& sql) {
     setStatus(st, buf);
 }
 
+void startExecute(AppState* st, const std::wstring& sql) {
+    st->busy = true;
+    st->cancelRequested = false;
+    setStatus(st, L"Running…  (Ctrl+. to cancel)");
+    HWND hwnd = st->hwnd;
+    st->session.executeAsync(sql, [hwnd](QueryResult r) {
+        auto* p = new QueryResult(std::move(r));
+        if (!PostMessageW(hwnd, WM_APP_RESULT, 0, reinterpret_cast<LPARAM>(p))) delete p;
+    });
+}
+
 void doRunWhole(AppState* st) {
-    if (!st->provider.isConnected()) {
+    if (!st->session.isConnected()) {
         setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
         return;
     }
-    doExecute(st, editorText(st->hEdit));
+    if (st->busy) {
+        setStatus(st, L"A query is already running — Ctrl+. to cancel.");
+        return;
+    }
+    startExecute(st, editorText(st->hEdit));
 }
 
 void doRunStatement(AppState* st) {
-    if (!st->provider.isConnected()) {
+    if (!st->session.isConnected()) {
         setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
         return;
     }
+    if (st->busy) {
+        setStatus(st, L"A query is already running — Ctrl+. to cancel.");
+        return;
+    }
     const std::wstring text = editorText(st->hEdit);
-    const auto stmt = sqlcore::SqlStatementSplitter::statementAtOffset(caretOffset(st->hEdit), text);
+    const auto stmt =
+        sqlcore::SqlStatementSplitter::statementAtOffset(caretOffset(st->hEdit), text);
     if (stmt) {
-        doExecute(st, *stmt);
+        startExecute(st, *stmt);
     } else {
         setStatus(st, L"No statement under the cursor.");
     }
 }
 
+void doCancel(AppState* st) {
+    if (!st->busy) return;
+    st->cancelRequested = true;
+    st->session.cancel();
+    setStatus(st, L"Cancelling…");
+}
+
 void doOpen(AppState* st) {
+    if (st->busy) {
+        setStatus(st, L"A query is running — Ctrl+. to cancel before opening.");
+        return;
+    }
     wchar_t file[1024] = L"";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -255,21 +295,16 @@ void doOpen(AppState* st) {
     ofn.lpstrTitle = L"Open or Create SQLite Database";
     if (!GetOpenFileNameW(&ofn)) return;
 
+    st->pendingPath = file;
     DatabaseConnection cfg;
     cfg.engine = DatabaseEngine::Sqlite;
     cfg.filePath = file;
-    std::wstring err;
-    if (!st->provider.connect(cfg, err)) {
-        MessageBoxW(st->hwnd, err.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
-        setStatus(st, L"Connection failed.");
-        return;
-    }
-    const std::wstring path = file;
-    const size_t slash = path.find_last_of(L"\\/");
-    st->dbName = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
-    clearGrid(st->hList);
-    setTitle(st);
-    setStatus(st, st->provider.statusMessage());
+    setStatus(st, L"Connecting…");
+    HWND hwnd = st->hwnd;
+    st->session.connectAsync(cfg, [hwnd](bool ok, std::wstring err) {
+        auto* m = new ConnectMsg{ok, std::move(err)};
+        if (!PostMessageW(hwnd, WM_APP_CONNECTED, 0, reinterpret_cast<LPARAM>(m))) delete m;
+    });
 }
 
 void createChildren(AppState* st, HINSTANCE hInst) {
@@ -323,6 +358,8 @@ void buildMenu(HWND hwnd) {
     HMENU query = CreatePopupMenu();
     AppendMenuW(query, MF_STRING, ID_RUN, L"&Run\tCtrl+E");
     AppendMenuW(query, MF_STRING, ID_RUN_STMT, L"Run &Statement at Cursor\tCtrl+Enter");
+    AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(query, MF_STRING, ID_CANCEL, L"&Cancel Running Query\tCtrl+.");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
     SetMenu(hwnd, bar);
 }
@@ -392,9 +429,42 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 doRunWhole(st);
             } else if (id == ID_RUN_STMT) {
                 doRunStatement(st);
+            } else if (id == ID_CANCEL) {
+                doCancel(st);
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
+            return 0;
+        }
+        case WM_APP_RESULT: {
+            auto* r = reinterpret_cast<QueryResult*>(lParam);
+            st->busy = false;
+            if (st->cancelRequested) {
+                setStatus(st, L"Query cancelled.");
+            } else if (r->error) {
+                setStatus(st, L"Error: " + *r->error);
+            } else {
+                showResult(st, *r);
+            }
+            st->cancelRequested = false;
+            delete r;
+            return 0;
+        }
+        case WM_APP_CONNECTED: {
+            auto* m = reinterpret_cast<ConnectMsg*>(lParam);
+            if (m->ok) {
+                const std::wstring& path = st->pendingPath;
+                const size_t slash = path.find_last_of(L"\\/");
+                st->dbName = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+                clearGrid(st->hList);
+                setTitle(st);
+                setStatus(st, st->session.statusMessage());
+            } else {
+                MessageBoxW(hwnd, m->error.c_str(), L"Connection failed",
+                            MB_ICONERROR | MB_OK);
+                setStatus(st, L"Connection failed.");
+            }
+            delete m;
             return 0;
         }
         case WM_SETFOCUS:
@@ -453,6 +523,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
         {FCONTROL | FVIRTKEY, static_cast<WORD>('E'), ID_RUN},
         {FCONTROL | FVIRTKEY, static_cast<WORD>('O'), ID_OPEN},
         {FCONTROL | FVIRTKEY, VK_RETURN, ID_RUN_STMT},
+        {FCONTROL | FVIRTKEY, VK_OEM_PERIOD, ID_CANCEL},
     };
     HACCEL hAccel = CreateAcceleratorTableW(accels, static_cast<int>(sizeof(accels) /
                                                                      sizeof(accels[0])));

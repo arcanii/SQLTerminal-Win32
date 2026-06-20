@@ -44,7 +44,9 @@ endif()
 # ---------------------------------------------------------------------------
 # SqlDb — engine providers (SqliteProvider now; PostgresProvider in P4).
 # ---------------------------------------------------------------------------
-add_library(SqlDb STATIC src/db/SqliteProvider.cpp)
+add_library(SqlDb STATIC
+  src/db/SqliteProvider.cpp
+  src/db/DatabaseSession.cpp)
 target_include_directories(SqlDb PUBLIC src)
 target_link_libraries(SqlDb PUBLIC sqlite3)
 
@@ -62,6 +64,11 @@ add_executable(SqlDbTests tests/sqlite_provider_tests.cpp)
 target_link_libraries(SqlDbTests PRIVATE SqlDb)
 target_include_directories(SqlDbTests PRIVATE tests)
 add_test(NAME SqlDbTests COMMAND SqlDbTests)
+
+add_executable(SqlSessionTests tests/database_session_tests.cpp)
+target_link_libraries(SqlSessionTests PRIVATE SqlDb)
+target_include_directories(SqlSessionTests PRIVATE tests)
+add_test(NAME SqlSessionTests COMMAND SqlSessionTests)
 
 # ---------------------------------------------------------------------------
 # SQLTerminal — the Win32 GUI app.
