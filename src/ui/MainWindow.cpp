@@ -34,6 +34,7 @@
 #include "models/QueryResult.h"
 #include "persistence/Stores.h"
 #include "platform/Updater.h"
+#include "resource.h"
 #include "security/CredentialStore.h"
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
@@ -1167,6 +1168,10 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     wc.lpszClassName = kClassName;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm = reinterpret_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
+                                                    IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                                    GetSystemMetrics(SM_CYSMICON), 0));
     if (!RegisterClassExW(&wc)) return 1;
 
     g_appInstance = hInstance;

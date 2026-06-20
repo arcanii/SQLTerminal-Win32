@@ -14,6 +14,7 @@ AppPublisher=SQLTerminal
 DefaultDirName={autopf}\{#MyApp}
 DefaultGroupName={#MyApp}
 DisableProgramGroupPage=yes
+SetupIconFile=app.ico
 UninstallDisplayIcon={app}\SQLTerminal.exe
 OutputDir=..\build\installer
 OutputBaseFilename=SQLTerminal-{#MyVer}-setup

@@ -166,6 +166,11 @@ add_executable(SQLTerminal WIN32
   src/ui/HistoryDialog.cpp
   src/platform/Updater.cpp
   packaging/SQLTerminal.rc)
+# The .rc embeds app.ico + app.manifest via ICON/RT_MANIFEST statements, but RC
+# dependency scanning doesn't treat those binary inputs as dependencies. Declare
+# them explicitly so editing the icon or manifest forces a .res rebuild.
+set_source_files_properties(packaging/SQLTerminal.rc PROPERTIES
+  OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.ico;${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.manifest")
 target_link_libraries(SQLTerminal PRIVATE
   SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi)
 # Our manifest is embedded via the .rc; stop the linker generating a competing one.

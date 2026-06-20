@@ -5,6 +5,10 @@
 // CREATEPROCESS_MANIFEST_RESOURCE_ID = 1.
 1 24 "app.manifest"
 
+// Application icon. The ID must match IDI_APPICON in src/resource.h; Explorer and
+// the taskbar use the lowest-numbered icon resource as the executable's icon.
+101 ICON "app.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,1,0,0
  PRODUCTVERSION 0,1,0,0
