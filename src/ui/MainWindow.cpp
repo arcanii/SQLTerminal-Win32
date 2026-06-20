@@ -127,6 +127,7 @@ struct AppState {
     HFONT hGlyph = nullptr;     // Segoe MDL2 Assets, for command-bar icons
     HWND hCmdBar = nullptr;     // custom top command bar (replaces the menu)
     int cmdHover = -1;          // hovered command-bar button index, or -1
+    int dpi = 96;               // window DPI (per-monitor-v2)
     std::wstring statusMsg;   // owner-drawn status bar, left part
     std::wstring flagsText;   // owner-drawn status bar, right part (SSL/read-only/tx)
     int editorHeight = 150;
@@ -160,6 +161,25 @@ struct AppState {
     bool pendingRemember = false;
     bool pendingTouchCredentials = false;
 };
+
+// Scale a 96-dpi design value to the window's current DPI.
+int dp(int v, int dpi) { return MulDiv(v, dpi, 96); }
+
+// Create (or recreate, on DPI change) the UI/monospace/glyph fonts at st->dpi.
+void createFonts(AppState* st) {
+    if (st->hUi) DeleteObject(st->hUi);
+    if (st->hMono) DeleteObject(st->hMono);
+    if (st->hGlyph) DeleteObject(st->hGlyph);
+    st->hUi = CreateFontW(-dp(14, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+    st->hMono = CreateFontW(-dp(14, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            FIXED_PITCH | FF_MODERN, L"Consolas");
+    st->hGlyph = CreateFontW(-dp(17, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+}
 
 double epochNow() {
     return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -284,17 +304,21 @@ void layout(AppState* st) {
     if (st->hStatus) SendMessageW(st->hStatus, WM_SIZE, 0, 0);
     RECT rc;
     GetClientRect(st->hwnd, &rc);
+    const int d = st->dpi;
     const int cw = rc.right;
-    const int top = kCmdBarH;
+    const int top = dp(kCmdBarH, d);
+    const int splitH = dp(kSplitterHeight, d);
+    const int minList = dp(kMinList, d);
+    const int minEdit = dp(kMinEditor, d);
     const int ch = (std::max)(0, static_cast<int>(rc.bottom) - statusHeight(st) - top);
 
-    if (st->hCmdBar) MoveWindow(st->hCmdBar, 0, 0, cw, kCmdBarH, TRUE);
+    if (st->hCmdBar) MoveWindow(st->hCmdBar, 0, 0, cw, top, TRUE);
 
     // Left: schema sidebar (tree) + vertical splitter.
-    const int vsW = kSplitterHeight;
+    const int vsW = splitH;
     int sw = st->sidebarWidth;
-    int maxSidebar = cw - 200 - vsW;
-    if (maxSidebar < 120) maxSidebar = (std::max)(0, cw - vsW);
+    int maxSidebar = cw - dp(200, d) - vsW;
+    if (maxSidebar < dp(120, d)) maxSidebar = (std::max)(0, cw - vsW);
     if (sw > maxSidebar) sw = maxSidebar;
     if (sw < 0) sw = 0;
     const int rx = sw + vsW;
@@ -304,19 +328,19 @@ void layout(AppState* st) {
 
     // Right: results / horizontal splitter / editor.
     int editH = st->editorHeight;
-    int maxEdit = ch - kMinList - kSplitterHeight;
-    if (maxEdit < kMinEditor) maxEdit = (std::max)(0, ch - kSplitterHeight);
+    int maxEdit = ch - minList - splitH;
+    if (maxEdit < minEdit) maxEdit = (std::max)(0, ch - splitH);
     if (editH > maxEdit) editH = maxEdit;
     if (editH < 0) editH = 0;
-    int listH = ch - editH - kSplitterHeight;
+    int listH = ch - editH - splitH;
     if (listH < 0) listH = 0;
 
     MoveWindow(st->hList, rx, top, rw, listH, TRUE);
-    MoveWindow(st->hSplitter, rx, top + listH, rw, kSplitterHeight, TRUE);
-    MoveWindow(st->hEdit, rx, top + listH + kSplitterHeight, rw, editH, TRUE);
+    MoveWindow(st->hSplitter, rx, top + listH, rw, splitH, TRUE);
+    MoveWindow(st->hEdit, rx, top + listH + splitH, rw, editH, TRUE);
 
     if (st->hStatus) {
-        int parts[2] = {cw - 220, -1};
+        int parts[2] = {cw - dp(220, d), -1};
         SendMessageW(st->hStatus, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
         updateFlags(st);
     }
@@ -594,15 +618,7 @@ LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PT
 
 void createChildren(AppState* st, HINSTANCE hInst) {
     const Theme& th = currentTheme();
-    st->hUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                          VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
-    st->hMono = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            FIXED_PITCH | FF_MODERN, L"Consolas");
-    st->hGlyph = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+    createFonts(st);
 
     st->hList = CreateWindowExW(
         0, WC_LISTVIEW, L"",
@@ -751,16 +767,18 @@ const CmdItem kCmdItems[] = {
 constexpr int kCmdCount = static_cast<int>(sizeof(kCmdItems) / sizeof(kCmdItems[0]));
 
 void cmdRects(HWND bar, RECT btn[kCmdCount], RECT* chip) {
+    auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(bar, GWLP_USERDATA));
+    const int d = st ? st->dpi : 96;
     RECT rc;
     GetClientRect(bar, &rc);
-    int x = 10;
+    int x = dp(10, d);
     for (int i = 0; i < kCmdCount; ++i) {
-        const int w = kCmdItems[i].label ? 78 : 38;
-        btn[i] = {x, 7, x + w, rc.bottom - 8};
-        x += w + 6;
+        const int w = kCmdItems[i].label ? dp(78, d) : dp(38, d);
+        btn[i] = {x, dp(7, d), x + w, rc.bottom - dp(8, d)};
+        x += w + dp(6, d);
     }
-    const int chipW = 196;
-    *chip = {rc.right - chipW - 10, 8, rc.right - 10, rc.bottom - 9};
+    const int chipW = dp(196, d);
+    *chip = {rc.right - chipW - dp(10, d), dp(8, d), rc.right - dp(10, d), rc.bottom - dp(9, d)};
 }
 
 void fillRound(HDC dc, const RECT& r, COLORREF fill, COLORREF edge, int radius) {
@@ -816,13 +834,13 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 const COLORREF fg = it.accent ? (busy ? th.textMuted : th.accentText)
                                               : (hov ? th.textPrimary : th.textSecondary);
                 RECT gr = btn[i];
-                if (it.label) gr.right = gr.left + 30;
+                if (it.label) gr.right = gr.left + dp(30, st->dpi);
                 SelectObject(dc, st->hGlyph);
                 SetTextColor(dc, fg);
                 DrawTextW(dc, it.glyph, -1, &gr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
                 if (it.label) {
                     RECT lr = btn[i];
-                    lr.left += 30;
+                    lr.left += dp(30, st->dpi);
                     SelectObject(dc, st->hUi);
                     SetTextColor(dc, fg);
                     DrawTextW(dc, it.label, -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
@@ -835,13 +853,14 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HBRUSH db = CreateSolidBrush(connected ? RGB(61, 220, 132) : th.textMuted);
             HGDIOBJ odb = SelectObject(dc, db);
             HGDIOBJ opn = SelectObject(dc, GetStockObject(NULL_PEN));
-            Ellipse(dc, chip.left + 12, cy - 4, chip.left + 20, cy + 4);
+            Ellipse(dc, chip.left + dp(12, st->dpi), cy - dp(4, st->dpi), chip.left + dp(20, st->dpi),
+                    cy + dp(4, st->dpi));
             SelectObject(dc, odb);
             SelectObject(dc, opn);
             DeleteObject(db);
             RECT cr = chip;
-            cr.left += 28;
-            cr.right -= 10;
+            cr.left += dp(28, st->dpi);
+            cr.right -= dp(10, st->dpi);
             SelectObject(dc, st->hUi);
             SetTextColor(dc, connected ? th.textPrimary : th.textSecondary);
             const std::wstring chipText =
@@ -932,22 +951,23 @@ LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 SelectObject(dc, st->hUi);
                 SetTextColor(dc, sorted ? th.accent : th.textSecondary);
                 RECT tr = rc;
-                tr.left += 10;
-                tr.right -= 18;
+                tr.left += dp(10, st->dpi);
+                tr.right -= dp(18, st->dpi);
                 DrawTextW(dc, buf, -1, &tr,
                           DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
                 if (sorted) {
-                    const int ax = rc.right - 12;
+                    const int ax = rc.right - dp(12, st->dpi);
                     const int ay = (rc.top + rc.bottom) / 2;
+                    const int aw = dp(4, st->dpi), ah = dp(3, st->dpi);
                     POINT tri[3];
                     if (st->sortAscending) {
-                        tri[0] = {ax, ay - 3};
-                        tri[1] = {ax - 4, ay + 3};
-                        tri[2] = {ax + 4, ay + 3};
+                        tri[0] = {ax, ay - ah};
+                        tri[1] = {ax - aw, ay + ah};
+                        tri[2] = {ax + aw, ay + ah};
                     } else {
-                        tri[0] = {ax - 4, ay - 3};
-                        tri[1] = {ax + 4, ay - 3};
-                        tri[2] = {ax, ay + 3};
+                        tri[0] = {ax - aw, ay - ah};
+                        tri[1] = {ax + aw, ay - ah};
+                        tri[2] = {ax, ay + ah};
                     }
                     HBRUSH ab = CreateSolidBrush(th.accent);
                     HGDIOBJ oab = SelectObject(dc, ab);
@@ -1000,12 +1020,15 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 ScreenToClient(st->hwnd, &pt);
                 RECT rc;
                 GetClientRect(st->hwnd, &rc);
+                const int d = st->dpi;
+                const int splitH = dp(kSplitterHeight, d);
+                const int minEdit = dp(kMinEditor, d);
                 const int contentBottom = static_cast<int>(rc.bottom) - statusHeight(st);
-                const int contentH = (std::max)(0, contentBottom - kCmdBarH);
-                int newEdit = contentBottom - kSplitterHeight - pt.y;
-                int maxEdit = contentH - kMinList - kSplitterHeight;
-                if (maxEdit < kMinEditor) maxEdit = kMinEditor;
-                if (newEdit < kMinEditor) newEdit = kMinEditor;
+                const int contentH = (std::max)(0, contentBottom - dp(kCmdBarH, d));
+                int newEdit = contentBottom - splitH - pt.y;
+                int maxEdit = contentH - dp(kMinList, d) - splitH;
+                if (maxEdit < minEdit) maxEdit = minEdit;
+                if (newEdit < minEdit) newEdit = minEdit;
                 if (newEdit > maxEdit) newEdit = maxEdit;
                 st->editorHeight = newEdit;
                 layout(st);
@@ -1052,10 +1075,12 @@ LRESULT CALLBACK VSplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 ScreenToClient(st->hwnd, &pt);
                 RECT rc;
                 GetClientRect(st->hwnd, &rc);
+                const int d = st->dpi;
+                const int minW = dp(120, d);
                 int newW = pt.x;
-                int maxW = rc.right - 200 - kSplitterHeight;
-                if (maxW < 120) maxW = 120;
-                if (newW < 120) newW = 120;
+                int maxW = rc.right - dp(200, d) - dp(kSplitterHeight, d);
+                if (maxW < minW) maxW = minW;
+                if (newW < minW) newW = minW;
                 if (newW > maxW) newW = maxW;
                 st->sidebarWidth = newW;
                 layout(st);
@@ -1224,8 +1249,10 @@ void onTreeContextMenu(AppState* st) {
 
 HWND createMainWindow(int nCmdShow) {
     auto* state = new AppState();
+    const int sysDpi = static_cast<int>(GetDpiForSystem());
     HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                CW_USEDEFAULT, 1100, 750, nullptr, nullptr, g_appInstance, state);
+                                CW_USEDEFAULT, MulDiv(1100, sysDpi, 96), MulDiv(750, sysDpi, 96),
+                                nullptr, nullptr, g_appInstance, state);
     if (!hwnd) {
         delete state;
         return nullptr;
@@ -1271,6 +1298,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CREATE:
+            st->dpi = static_cast<int>(GetDpiForWindow(hwnd));
+            st->sidebarWidth = dp(st->sidebarWidth, st->dpi);
+            st->editorHeight = dp(st->editorHeight, st->dpi);
             allowDarkForWindow(hwnd);
             createChildren(st, reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance);
             layout(st);
@@ -1282,10 +1312,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE:
             if (st) layout(st);
             return 0;
+        case WM_DPICHANGED:
+            if (st) {
+                const int oldDpi = st->dpi;
+                st->dpi = HIWORD(wParam);
+                if (oldDpi > 0) {
+                    st->sidebarWidth = MulDiv(st->sidebarWidth, st->dpi, oldDpi);
+                    st->editorHeight = MulDiv(st->editorHeight, st->dpi, oldDpi);
+                }
+                createFonts(st);
+                SendMessageW(st->hTree, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
+                SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
+                auto* sug = reinterpret_cast<RECT*>(lParam);
+                SetWindowPos(hwnd, nullptr, sug->left, sug->top, sug->right - sug->left,
+                             sug->bottom - sug->top, SWP_NOZORDER | SWP_NOACTIVATE);
+                layout(st);
+                InvalidateRect(st->hCmdBar, nullptr, TRUE);
+            }
+            return 0;
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-            mmi->ptMinTrackSize.x = 900;
-            mmi->ptMinTrackSize.y = 600;
+            const int d = st ? st->dpi : static_cast<int>(GetDpiForSystem());
+            mmi->ptMinTrackSize.x = dp(900, d);
+            mmi->ptMinTrackSize.y = dp(600, d);
             return 0;
         }
         case WM_COMMAND: {
@@ -1359,7 +1408,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HGDIOBJ oldFont = SelectObject(dis->hDC, st->hUi);
                 RECT tr = dis->rcItem;
                 if (dis->itemID == 0) {
-                    tr.left += 12;
+                    tr.left += dp(12, st->dpi);
                     SetTextColor(dis->hDC, th.textPrimary);
                     DrawTextW(dis->hDC, st->statusMsg.c_str(), -1, &tr,
                               DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -1376,26 +1425,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         {st->inTransaction, L"in transaction", th.accent},
                     };
                     SelectObject(dis->hDC, st->hUi);
-                    int right = tr.right - 12;
+                    int right = tr.right - dp(12, st->dpi);
                     for (int i = static_cast<int>(sizeof(flags) / sizeof(flags[0])) - 1; i >= 0; --i) {
                         if (!flags[i].on) continue;
                         SIZE sz{};
                         GetTextExtentPoint32W(dis->hDC, flags[i].text, lstrlenW(flags[i].text), &sz);
-                        const int w = sz.cx + 18;
-                        const int h = 18;
+                        const int w = sz.cx + dp(18, st->dpi);
+                        const int h = dp(18, st->dpi);
                         const int midY = (tr.top + tr.bottom) / 2;
                         RECT pr{right - w, midY - h / 2, right, midY + h / 2};
                         HBRUSH pb = CreateSolidBrush(th.panelBg);
                         HGDIOBJ ob = SelectObject(dis->hDC, pb);
                         HGDIOBJ op = SelectObject(dis->hDC, GetStockObject(NULL_PEN));
-                        RoundRect(dis->hDC, pr.left, pr.top, pr.right, pr.bottom, 9, 9);
+                        RoundRect(dis->hDC, pr.left, pr.top, pr.right, pr.bottom, dp(9, st->dpi),
+                                  dp(9, st->dpi));
                         SelectObject(dis->hDC, ob);
                         SelectObject(dis->hDC, op);
                         DeleteObject(pb);
                         SetTextColor(dis->hDC, flags[i].fg);
                         DrawTextW(dis->hDC, flags[i].text, -1, &pr,
                                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-                        right -= w + 6;
+                        right -= w + dp(6, st->dpi);
                     }
                 }
                 SelectObject(dis->hDC, oldFont);
