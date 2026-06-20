@@ -166,8 +166,15 @@ double epochNow() {
 }
 
 void applyDarkTitleBar(HWND hwnd) {
-    BOOL dark = systemUsesDarkMode() ? TRUE : FALSE;
+    const Theme& th = currentTheme();
+    BOOL dark = th.dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    // Win11 (build 22000+): paint the caption + border to match the command bar
+    // for a seamless dark top strip. No-ops harmlessly on older Windows.
+    COLORREF caption = th.panelElevBg, text = th.textSecondary, border = th.border;
+    DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, 36 /* DWMWA_TEXT_COLOR */, &text, sizeof(text));
+    DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
 }
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
@@ -583,6 +590,8 @@ void doConnectionDetails(AppState* st) {
     MessageBoxW(st->hwnd, m.c_str(), L"Connection Details", MB_OK | MB_ICONINFORMATION);
 }
 
+LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+
 void createChildren(AppState* st, HINSTANCE hInst) {
     const Theme& th = currentTheme();
     st->hUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -605,6 +614,7 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     ListView_SetTextColor(st->hList, th.textPrimary);
     if (th.dark) SetWindowTheme(st->hList, L"DarkMode_Explorer", nullptr);
     SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
+    SetWindowSubclass(st->hList, ListSubclassProc, 1, reinterpret_cast<DWORD_PTR>(st));
 
     st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                     st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
@@ -884,6 +894,76 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// Subclass the results ListView so we can dark-custom-draw its header (the
+// header notifies its parent, the ListView, so we intercept it here).
+LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                  DWORD_PTR ref) {
+    auto* st = reinterpret_cast<AppState*>(ref);
+    if (msg == WM_NOTIFY) {
+        auto* nh = reinterpret_cast<NMHDR*>(lParam);
+        if (nh->code == NM_CUSTOMDRAW && nh->hwndFrom == ListView_GetHeader(hwnd)) {
+            auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
+            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
+                const Theme& th = currentTheme();
+                HDC dc = cd->hdc;
+                RECT rc = cd->rc;
+                HBRUSH bg = CreateSolidBrush(th.panelElevBg);
+                FillRect(dc, &rc, bg);
+                DeleteObject(bg);
+                HPEN pen = CreatePen(PS_SOLID, 1, th.border);
+                HGDIOBJ op = SelectObject(dc, pen);
+                MoveToEx(dc, rc.left, rc.bottom - 1, nullptr);
+                LineTo(dc, rc.right, rc.bottom - 1);
+                SelectObject(dc, op);
+                DeleteObject(pen);
+
+                const int col = static_cast<int>(cd->dwItemSpec);
+                wchar_t buf[256] = L"";
+                HDITEMW hi{};
+                hi.mask = HDI_TEXT;
+                hi.pszText = buf;
+                hi.cchTextMax = 256;
+                Header_GetItem(nh->hwndFrom, col, &hi);
+                const bool sorted = (col == st->sortColumn);
+                SetBkMode(dc, TRANSPARENT);
+                SelectObject(dc, st->hUi);
+                SetTextColor(dc, sorted ? th.accent : th.textSecondary);
+                RECT tr = rc;
+                tr.left += 10;
+                tr.right -= 18;
+                DrawTextW(dc, buf, -1, &tr,
+                          DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+                if (sorted) {
+                    const int ax = rc.right - 12;
+                    const int ay = (rc.top + rc.bottom) / 2;
+                    POINT tri[3];
+                    if (st->sortAscending) {
+                        tri[0] = {ax, ay - 3};
+                        tri[1] = {ax - 4, ay + 3};
+                        tri[2] = {ax + 4, ay + 3};
+                    } else {
+                        tri[0] = {ax - 4, ay - 3};
+                        tri[1] = {ax + 4, ay - 3};
+                        tri[2] = {ax, ay + 3};
+                    }
+                    HBRUSH ab = CreateSolidBrush(th.accent);
+                    HGDIOBJ oab = SelectObject(dc, ab);
+                    HGDIOBJ oap = SelectObject(dc, GetStockObject(NULL_PEN));
+                    Polygon(dc, tri, 3);
+                    SelectObject(dc, oab);
+                    SelectObject(dc, oap);
+                    DeleteObject(ab);
+                }
+                return CDRF_SKIPDEFAULT;
+            }
+            return CDRF_DODEFAULT;
+        }
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ListSubclassProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1284,10 +1364,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DrawTextW(dis->hDC, st->statusMsg.c_str(), -1, &tr,
                               DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
                 } else {
-                    tr.right -= 12;
-                    SetTextColor(dis->hDC, th.textSecondary);
-                    DrawTextW(dis->hDC, st->flagsText.c_str(), -1, &tr,
-                              DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+                    // Right part: active status flags as subtle pills, right-to-left.
+                    struct Flag {
+                        bool on;
+                        const wchar_t* text;
+                        COLORREF fg;
+                    };
+                    const Flag flags[] = {
+                        {st->sslActive, L"SSL", RGB(120, 190, 255)},
+                        {st->readOnly, L"read-only", RGB(240, 181, 97)},
+                        {st->inTransaction, L"in transaction", th.accent},
+                    };
+                    SelectObject(dis->hDC, st->hUi);
+                    int right = tr.right - 12;
+                    for (int i = static_cast<int>(sizeof(flags) / sizeof(flags[0])) - 1; i >= 0; --i) {
+                        if (!flags[i].on) continue;
+                        SIZE sz{};
+                        GetTextExtentPoint32W(dis->hDC, flags[i].text, lstrlenW(flags[i].text), &sz);
+                        const int w = sz.cx + 18;
+                        const int h = 18;
+                        const int midY = (tr.top + tr.bottom) / 2;
+                        RECT pr{right - w, midY - h / 2, right, midY + h / 2};
+                        HBRUSH pb = CreateSolidBrush(th.panelBg);
+                        HGDIOBJ ob = SelectObject(dis->hDC, pb);
+                        HGDIOBJ op = SelectObject(dis->hDC, GetStockObject(NULL_PEN));
+                        RoundRect(dis->hDC, pr.left, pr.top, pr.right, pr.bottom, 9, 9);
+                        SelectObject(dis->hDC, ob);
+                        SelectObject(dis->hDC, op);
+                        DeleteObject(pb);
+                        SetTextColor(dis->hDC, flags[i].fg);
+                        DrawTextW(dis->hDC, flags[i].text, -1, &pr,
+                                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+                        right -= w + 6;
+                    }
                 }
                 SelectObject(dis->hDC, oldFont);
                 return TRUE;
@@ -1332,6 +1441,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                                   st->sortAscending);
                     updateSortArrow(st);
                     InvalidateRect(st->hList, nullptr, TRUE);
+                    InvalidateRect(ListView_GetHeader(st->hList), nullptr, TRUE);
                     return 0;
                 }
                 if (nh->code == NM_CUSTOMDRAW) {
