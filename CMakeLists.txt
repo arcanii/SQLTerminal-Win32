@@ -172,7 +172,7 @@ add_executable(SQLTerminal WIN32
 set_source_files_properties(packaging/SQLTerminal.rc PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.ico;${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.manifest")
 target_link_libraries(SQLTerminal PRIVATE
-  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi)
+  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi uxtheme)
 # Our manifest is embedded via the .rc; stop the linker generating a competing one.
 if(MSVC)
   target_link_options(SQLTerminal PRIVATE /MANIFEST:NO)

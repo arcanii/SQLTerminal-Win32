@@ -10,6 +10,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 
 #define _RICHEDIT_VER 0x0500
 #include <richedit.h>
@@ -39,6 +40,7 @@
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
 #include "ui/HistoryDialog.h"
+#include "ui/Theme.h"
 
 namespace sqlterm {
 namespace {
@@ -117,6 +119,9 @@ struct AppState {
     HWND hTree = nullptr;
     HWND hVSplitter = nullptr;
     HFONT hMono = nullptr;
+    HFONT hUi = nullptr;
+    std::wstring statusMsg;   // owner-drawn status bar, left part
+    std::wstring flagsText;   // owner-drawn status bar, right part (SSL/read-only/tx)
     int editorHeight = 150;
     int sidebarWidth = 220;
     std::wstring contextTable;  // table the schema context menu acted on
@@ -153,28 +158,20 @@ double epochNow() {
     return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// Follow the system light/dark setting for the window title bar (Win10 2004+).
-bool systemUsesDarkMode() {
-    DWORD value = 1, size = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
-        return false;
-    return value == 0;
-}
 void applyDarkTitleBar(HWND hwnd) {
     BOOL dark = systemUsesDarkMode() ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
 }
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
+    const Theme& th = currentTheme();
     switch (t) {
-        case sqlcore::SyntaxToken::Keyword: return RGB(199, 37, 108);
-        case sqlcore::SyntaxToken::Number: return RGB(128, 0, 128);
-        case sqlcore::SyntaxToken::StringLiteral: return RGB(196, 26, 22);
-        case sqlcore::SyntaxToken::Comment: return RGB(34, 139, 34);
+        case sqlcore::SyntaxToken::Keyword: return th.synKeyword;
+        case sqlcore::SyntaxToken::Number: return th.synNumber;
+        case sqlcore::SyntaxToken::StringLiteral: return th.synString;
+        case sqlcore::SyntaxToken::Comment: return th.synComment;
     }
-    return GetSysColor(COLOR_WINDOWTEXT);
+    return th.textPrimary;
 }
 
 std::wstring editorText(HWND edit) {
@@ -218,7 +215,7 @@ void applyHighlight(AppState* st) {
     CHARFORMAT2W base{};
     base.cbSize = sizeof(base);
     base.dwMask = CFM_COLOR;
-    base.crTextColor = GetSysColor(COLOR_WINDOWTEXT);
+    base.crTextColor = currentTheme().textPrimary;
     SendMessageW(e, EM_SETSEL, 0, -1);
     SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
 
@@ -239,19 +236,21 @@ void applyHighlight(AppState* st) {
 }
 
 void setStatus(AppState* st, const std::wstring& text) {
-    SendMessageW(st->hStatus, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    st->statusMsg = text;
+    SendMessageW(st->hStatus, SB_SETTEXTW, 0 | SBT_OWNERDRAW, 0);
 }
 
 void updateFlags(AppState* st) {
     std::wstring f;
     auto add = [&](const wchar_t* s) {
-        if (!f.empty()) f += L"  ·  ";
+        if (!f.empty()) f += L"   ·   ";
         f += s;
     };
     if (st->sslActive) add(L"SSL");
     if (st->readOnly) add(L"read-only");
     if (st->inTransaction) add(L"in transaction");
-    SendMessageW(st->hStatus, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(f.c_str()));
+    st->flagsText = f;
+    SendMessageW(st->hStatus, SB_SETTEXTW, 1 | SBT_OWNERDRAW, 0);
 }
 
 void setTitle(AppState* st) {
@@ -575,12 +574,24 @@ void doConnectionDetails(AppState* st) {
 }
 
 void createChildren(AppState* st, HINSTANCE hInst) {
+    const Theme& th = currentTheme();
+    st->hUi = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+    st->hMono = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            FIXED_PITCH | FF_MODERN, L"Consolas");
+
     st->hList = CreateWindowExW(
         0, WC_LISTVIEW, L"",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA, 0, 0, 0, 0,
         st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst, nullptr);
-    ListView_SetExtendedListViewStyle(
-        st->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+    ListView_SetExtendedListViewStyle(st->hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    ListView_SetBkColor(st->hList, th.panelBg);
+    ListView_SetTextBkColor(st->hList, th.panelBg);
+    ListView_SetTextColor(st->hList, th.textPrimary);
+    if (th.dark) SetWindowTheme(st->hList, L"DarkMode_Explorer", nullptr);
+    SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
 
     st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                     st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
@@ -588,9 +599,14 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     SetWindowLongPtrW(st->hSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
     st->hTree = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_TREEVIEW, L"",
+        0, WC_TREEVIEW, L"",
         WS_CHILD | WS_VISIBLE | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
         0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TREE)), hInst, nullptr);
+    TreeView_SetBkColor(st->hTree, th.panelBg);
+    TreeView_SetTextColor(st->hTree, th.textPrimary);
+    if (th.dark) SetWindowTheme(st->hTree, L"DarkMode_Explorer", nullptr);
+    SendMessageW(st->hTree, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
+
     st->hVSplitter = CreateWindowExW(0, kVSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                      st->hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_VSPLIT)),
@@ -598,16 +614,17 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     SetWindowLongPtrW(st->hVSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
     st->hEdit = CreateWindowExW(
-        WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+        0, MSFTEDIT_CLASS, L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
             ES_NOHIDESEL,
         0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)), hInst, nullptr);
-    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(GetSysColor(COLOR_WINDOW)));
+    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(th.windowBg));
+    if (th.dark) SetWindowTheme(st->hEdit, L"DarkMode_Explorer", nullptr);
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
     cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR;
     cf.yHeight = 220;
-    cf.crTextColor = GetSysColor(COLOR_WINDOWTEXT);
+    cf.crTextColor = th.textPrimary;
     lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
     SendMessageW(st->hEdit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
     SetWindowTextW(st->hEdit, L"SELECT * FROM users;");
@@ -658,6 +675,27 @@ void buildMenu(HWND hwnd) {
 LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const Theme& th = currentTheme();
+            HBRUSH bg = CreateSolidBrush(th.windowBg);
+            FillRect(dc, &rc, bg);
+            DeleteObject(bg);
+            HPEN pen = CreatePen(PS_SOLID, 1, th.border);
+            HGDIOBJ old = SelectObject(dc, pen);
+            const int y = (rc.bottom - rc.top) / 2;
+            MoveToEx(dc, rc.left, y, nullptr);
+            LineTo(dc, rc.right, y);
+            SelectObject(dc, old);
+            DeleteObject(pen);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_LBUTTONDOWN:
             SetCapture(hwnd);
             return 0;
@@ -688,6 +726,27 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 LRESULT CALLBACK VSplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            const Theme& th = currentTheme();
+            HBRUSH bg = CreateSolidBrush(th.windowBg);
+            FillRect(dc, &rc, bg);
+            DeleteObject(bg);
+            HPEN pen = CreatePen(PS_SOLID, 1, th.border);
+            HGDIOBJ old = SelectObject(dc, pen);
+            const int x = (rc.right - rc.left) / 2;
+            MoveToEx(dc, x, rc.top, nullptr);
+            LineTo(dc, x, rc.bottom);
+            SelectObject(dc, old);
+            DeleteObject(pen);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_LBUTTONDOWN:
             SetCapture(hwnd);
             return 0;
@@ -993,6 +1052,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (st && dis->hwndItem == st->hStatus) {
+                const Theme& th = currentTheme();
+                HBRUSH bg = CreateSolidBrush(th.panelElevBg);
+                FillRect(dis->hDC, &dis->rcItem, bg);
+                DeleteObject(bg);
+                SetBkMode(dis->hDC, TRANSPARENT);
+                HGDIOBJ oldFont = SelectObject(dis->hDC, st->hUi);
+                RECT tr = dis->rcItem;
+                if (dis->itemID == 0) {
+                    tr.left += 12;
+                    SetTextColor(dis->hDC, th.textPrimary);
+                    DrawTextW(dis->hDC, st->statusMsg.c_str(), -1, &tr,
+                              DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+                } else {
+                    tr.right -= 12;
+                    SetTextColor(dis->hDC, th.textSecondary);
+                    DrawTextW(dis->hDC, st->flagsText.c_str(), -1, &tr,
+                              DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+                }
+                SelectObject(dis->hDC, oldFont);
+                return TRUE;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
         case WM_NOTIFY: {
             auto* nh = reinterpret_cast<NMHDR*>(lParam);
             if (st && nh->idFrom == IDC_TREE) {
@@ -1037,8 +1122,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
                     if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
                     if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                        cd->clrTextBk = (cd->nmcd.dwItemSpec % 2) ? RGB(245, 245, 245)
-                                                                  : GetSysColor(COLOR_WINDOW);
+                        const Theme& th = currentTheme();
+                        const int row = static_cast<int>(cd->nmcd.dwItemSpec);
+                        const bool sel =
+                            (ListView_GetItemState(st->hList, row, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+                        if (sel) {
+                            cd->clrText = th.selectionText;
+                            cd->clrTextBk = th.selectionBg;
+                        } else {
+                            cd->clrText = th.textPrimary;
+                            cd->clrTextBk = (row % 2) ? th.altRowBg : th.panelBg;
+                        }
                         return CDRF_DODEFAULT;
                     }
                     return CDRF_DODEFAULT;
@@ -1118,6 +1212,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_DESTROY:
             if (st && st->hMono) DeleteObject(st->hMono);
+            if (st && st->hUi) DeleteObject(st->hUi);
             return 0;
         case WM_NCDESTROY:
             delete st;
@@ -1167,7 +1262,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     wc.hInstance = hInstance;
     wc.lpszClassName = kClassName;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = CreateSolidBrush(currentTheme().windowBg);
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
     wc.hIconSm = reinterpret_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
                                                     IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
