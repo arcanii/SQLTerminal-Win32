@@ -7,6 +7,9 @@
 // warm coral accent. Pure GDI COLORREFs — no platform deps beyond <windows.h>.
 #include <windows.h>
 
+#include <dwmapi.h>
+#include <uxtheme.h>
+
 namespace sqlterm {
 
 struct Theme {
@@ -91,6 +94,66 @@ inline const Theme& currentTheme() {
     static const Theme dark = makeDarkTheme();
     static const Theme light = makeLightTheme();
     return systemUsesDarkMode() ? dark : light;
+}
+
+// ---- shared dialog dark-mode + DPI helpers ----------------------------------
+
+// Scale a 96-dpi design value to a window's DPI.
+inline int dpiScale(int v, UINT dpi) { return MulDiv(v, static_cast<int>(dpi), 96); }
+
+// Small process-lifetime brush cache so WM_CTLCOLOR* can return a stable HBRUSH.
+inline HBRUSH themeBrush(COLORREF c) {
+    static COLORREF colors[12];
+    static HBRUSH brushes[12];
+    static int count = 0;
+    for (int i = 0; i < count; ++i)
+        if (colors[i] == c) return brushes[i];
+    HBRUSH b = CreateSolidBrush(c);
+    if (count < 12) {
+        colors[count] = c;
+        brushes[count] = b;
+        ++count;
+    }
+    return b;
+}
+
+// Handle WM_CTLCOLOR{STATIC,EDIT,LISTBOX,BTN}: dark field/background, light text.
+inline LRESULT dialogCtlColor(UINT msg, WPARAM wParam) {
+    const Theme& th = currentTheme();
+    HDC hdc = reinterpret_cast<HDC>(wParam);
+    const COLORREF bg =
+        (msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX) ? th.windowBg : th.panelBg;
+    SetTextColor(hdc, th.textPrimary);
+    SetBkColor(hdc, bg);
+    return reinterpret_cast<LRESULT>(themeBrush(bg));
+}
+
+// Theme a popup dialog + its child controls dark (Win10 1809+; no-op otherwise).
+inline void applyDialogDarkMode(HWND dlg) {
+    const Theme& th = currentTheme();
+    BOOL dark = th.dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(dlg, 20 /*USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    COLORREF cap = th.panelElevBg, txt = th.textSecondary, bdr = th.border;
+    DwmSetWindowAttribute(dlg, 35 /*CAPTION_COLOR*/, &cap, sizeof(cap));
+    DwmSetWindowAttribute(dlg, 36 /*TEXT_COLOR*/, &txt, sizeof(txt));
+    DwmSetWindowAttribute(dlg, 34 /*BORDER_COLOR*/, &bdr, sizeof(bdr));
+    if (!th.dark) return;
+    if (HMODULE ux = GetModuleHandleW(L"uxtheme.dll")) {
+        using AllowFn = BOOL(WINAPI*)(HWND, BOOL);
+        if (auto allow = reinterpret_cast<AllowFn>(GetProcAddress(ux, MAKEINTRESOURCEA(133))))
+            allow(dlg, TRUE);
+    }
+    EnumChildWindows(
+        dlg,
+        [](HWND child, LPARAM) -> BOOL {
+            wchar_t cls[64] = L"";
+            GetClassNameW(child, cls, 64);
+            SetWindowTheme(child,
+                           lstrcmpiW(cls, L"COMBOBOX") == 0 ? L"DarkMode_CFD" : L"DarkMode_Explorer",
+                           nullptr);
+            return TRUE;
+        },
+        0);
 }
 
 }  // namespace sqlterm

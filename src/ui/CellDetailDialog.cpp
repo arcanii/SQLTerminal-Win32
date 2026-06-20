@@ -6,6 +6,7 @@
 #include <string>
 
 #include "app/ResultFormat.h"
+#include "ui/Theme.h"
 
 namespace sqlterm {
 namespace {
@@ -17,6 +18,7 @@ constexpr int H = 440;
 
 struct State {
     HWND hwnd = nullptr;
+    UINT dpi = 96;
     HFONT font = nullptr;
     std::wstring raw;
     std::optional<std::wstring> pretty;
@@ -52,6 +54,11 @@ LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN:
+            return dialogCtlColor(msg, wParam);
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             if (id == IDC_JSON) {
@@ -82,19 +89,19 @@ void showCellDetail(HWND owner, const std::wstring& column, const std::wstring& 
         wc.hInstance = hInst;
         wc.lpszClassName = kClass;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = themeBrush(currentTheme().panelBg);
         RegisterClassExW(&wc);
         registered = true;
     }
 
     State st;
-    st.font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     st.raw = value;
     st.pretty = prettyPrintJson(value);
 
+    const UINT odpi = GetDpiForWindow(owner);
     RECT orc{};
     GetWindowRect(owner, &orc);
-    const int fullW = W + 16, fullH = H + 39;
+    const int fullW = dpiScale(W + 16, odpi), fullH = dpiScale(H + 39, odpi);
     const int x = orc.left + ((orc.right - orc.left) - fullW) / 2;
     const int y = orc.top + ((orc.bottom - orc.top) - fullH) / 2;
 
@@ -102,11 +109,17 @@ void showCellDetail(HWND owner, const std::wstring& column, const std::wstring& 
                                 WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, fullW, fullH, owner,
                                 nullptr, hInst, &st);
     if (!hwnd) return;
+    st.dpi = GetDpiForWindow(hwnd);
+    st.font = CreateFontW(-dpiScale(15, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
 
     auto mk = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int cx, int cy, int cw,
                   int chh, int id) {
-        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, cx, cy, cw, chh, hwnd,
-                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), hInst, nullptr);
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, dpiScale(cx, st.dpi),
+                                 dpiScale(cy, st.dpi), dpiScale(cw, st.dpi), dpiScale(chh, st.dpi),
+                                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), hInst,
+                                 nullptr);
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st.font), TRUE);
         return c;
     };
@@ -115,9 +128,9 @@ void showCellDetail(HWND owner, const std::wstring& column, const std::wstring& 
                          WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY |
                              ES_AUTOVSCROLL | ES_AUTOHSCROLL,
                          12, 12, W - 24, H - 84, IDC_VALUE);
-    HFONT mono = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             FIXED_PITCH | FF_MODERN, L"Consolas");
+    HFONT mono = CreateFontW(-dpiScale(14, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
     if (mono) SendMessageW(value_edit, WM_SETFONT, reinterpret_cast<WPARAM>(mono), TRUE);
 
     wchar_t count[64];
@@ -127,6 +140,7 @@ void showCellDetail(HWND owner, const std::wstring& column, const std::wstring& 
     mk(L"BUTTON", L"Copy", BS_PUSHBUTTON | WS_TABSTOP, W - 200, H - 40, 90, 26, IDC_COPY);
     mk(L"BUTTON", L"Close", BS_DEFPUSHBUTTON | WS_TABSTOP, W - 104, H - 40, 90, 26, IDCANCEL);
 
+    applyDialogDarkMode(hwnd);
     EnableWindow(owner, FALSE);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -142,6 +156,7 @@ void showCellDetail(HWND owner, const std::wstring& column, const std::wstring& 
     SetForegroundWindow(owner);
     if (mono) DeleteObject(mono);
     DestroyWindow(hwnd);
+    if (st.font) DeleteObject(st.font);
 }
 
 }  // namespace sqlterm

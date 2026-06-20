@@ -10,6 +10,7 @@
 #include "models/ConnectionProfile.h"
 #include "persistence/Stores.h"
 #include "security/CredentialStore.h"
+#include "ui/Theme.h"
 
 namespace sqlterm {
 namespace {
@@ -36,6 +37,7 @@ constexpr int H = 412;
 
 struct DlgState {
     HWND hwnd = nullptr;
+    UINT dpi = 96;
     HFONT font = nullptr;
     std::vector<ConnectionProfile> profiles;  // aligned to profile combo items 1..N
     std::optional<ConnectionRequest> result;
@@ -159,8 +161,9 @@ void buildRequest(DlgState* st) {
 
 HWND mk(DlgState* st, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y,
         int w, int h, int id) {
-    HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, st->hwnd,
-                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+    HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, dpiScale(x, st->dpi),
+                             dpiScale(y, st->dpi), dpiScale(w, st->dpi), dpiScale(h, st->dpi),
+                             st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                              reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(st->hwnd, GWLP_HINSTANCE)),
                              nullptr);
     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(st->font), TRUE);
@@ -244,8 +247,18 @@ LRESULT CALLBACK DlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CREATE:
+            st->dpi = GetDpiForWindow(hwnd);
+            st->font = CreateFontW(-dpiScale(15, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
             createControls(st);
+            applyDialogDarkMode(hwnd);
             return 0;
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN:
+            return dialogCtlColor(msg, wParam);
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             const int code = HIWORD(wParam);
@@ -294,18 +307,18 @@ std::optional<ConnectionRequest> showConnectionDialog(HWND owner) {
         wc.hInstance = hInst;
         wc.lpszClassName = kDlgClass;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = themeBrush(currentTheme().panelBg);
         RegisterClassExW(&wc);
         registered = true;
     }
 
     DlgState st;
-    st.font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-    // Center over the owner.
+    // Center over the owner, sized at the owner's DPI.
+    const UINT odpi = GetDpiForWindow(owner);
     RECT orc{};
     GetWindowRect(owner, &orc);
-    const int fullW = W + 16, fullH = H + 39;  // account for frame + caption (approx)
+    const int fullW = dpiScale(W + 16, odpi), fullH = dpiScale(H + 39, odpi);
     const int x = orc.left + ((orc.right - orc.left) - fullW) / 2;
     const int y = orc.top + ((orc.bottom - orc.top) - fullH) / 2;
 
@@ -329,6 +342,7 @@ std::optional<ConnectionRequest> showConnectionDialog(HWND owner) {
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
     DestroyWindow(hwnd);
+    if (st.font) DeleteObject(st.font);
     return st.result;
 }
 
