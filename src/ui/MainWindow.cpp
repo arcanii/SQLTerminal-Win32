@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// P2 main window: a results ListView (top), a draggable splitter, and a RichEdit
-// SQL editor (bottom) with live syntax highlighting, plus a status bar. Run the
-// whole editor with Ctrl+E or the statement under the cursor with Ctrl+Enter.
-// Execution is still synchronous on the UI thread (P3 moves it off-thread).
+// Main window: results ListView (top), draggable splitter, RichEdit SQL editor
+// (bottom) with live highlighting, and a 2-part status bar. Run the whole editor
+// (Ctrl+E) or the statement at the cursor (Ctrl+Enter); cancel with Ctrl+.;
+// navigate command history with Ctrl+Up/Down. Dot-commands, read-only mode,
+// destructive-statement confirmation, and transactions are handled here via the
+// pure SqlApp logic. Execution runs off the UI thread (DatabaseSession).
 #include "ui/MainWindow.h"
 
 #include <commctrl.h>
@@ -12,15 +14,20 @@
 #include <richedit.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include "app/DotCommandHandler.h"
+#include "app/TerminalLogic.h"
 #include "core/SqlStatementSplitter.h"
 #include "core/SqlSyntaxHighlighter.h"
 #include "db/DatabaseSession.h"
 #include "models/ConnectionProfile.h"
 #include "models/DatabaseConnection.h"
+#include "models/DatabaseEngine.h"
 #include "models/QueryResult.h"
 #include "persistence/Stores.h"
 #include "security/CredentialStore.h"
@@ -38,14 +45,18 @@ enum : int {
     ID_RUN = 1003,
     ID_RUN_STMT = 1004,
     ID_CANCEL = 1005,
+    ID_READONLY = 1006,
+    ID_TX_BEGIN = 1007,
+    ID_TX_COMMIT = 1008,
+    ID_TX_ROLLBACK = 1009,
+    ID_HIST_UP = 1010,
+    ID_HIST_DOWN = 1011,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
     IDC_STATUS = 2005,
 };
 
-// Worker-thread results are marshalled to the UI thread via these messages; the
-// LPARAM is a heap payload owned by (and freed in) the handler.
 constexpr UINT WM_APP_RESULT = WM_APP + 1;     // lParam = QueryResult*
 constexpr UINT WM_APP_CONNECTED = WM_APP + 2;  // lParam = ConnectMsg*
 
@@ -61,41 +72,56 @@ constexpr int kMinList = 100;
 struct AppState {
     HWND hwnd = nullptr;
     HWND hList = nullptr;
-    HWND hEdit = nullptr;     // RichEdit
+    HWND hEdit = nullptr;
     HWND hSplitter = nullptr;
     HWND hStatus = nullptr;
-    int editorHeight = 150;   // user-draggable
+    HFONT hMono = nullptr;
+    int editorHeight = 150;
     bool suppressHighlight = false;
-    bool busy = false;            // a query is in flight
-    bool cancelRequested = false; // user hit Ctrl+. for the in-flight query
+    bool busy = false;
+    bool cancelRequested = false;
     DatabaseSession session;
+
     std::wstring dbName;
-    std::optional<ConnectionRequest> pendingRequest;  // connection being established
+    DatabaseConnection currentConnection;
+    DatabaseEngine currentEngine = DatabaseEngine::Sqlite;
+    bool readOnly = false;
+    bool inTransaction = false;
+    CommandHistory cmdHistory;
+    std::vector<std::wstring> lastRunStatements;
+
+    // Pending connect (applied on WM_APP_CONNECTED success).
+    DatabaseConnection pendingConn;
+    std::optional<std::wstring> pendingSaveAs;
+    bool pendingRemember = false;
+    bool pendingTouchCredentials = false;
 };
+
+double epochNow() {
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 COLORREF colorFor(sqlcore::SyntaxToken t) {
     switch (t) {
-        case sqlcore::SyntaxToken::Keyword: return RGB(199, 37, 108);   // pink
-        case sqlcore::SyntaxToken::Number: return RGB(128, 0, 128);     // purple
-        case sqlcore::SyntaxToken::StringLiteral: return RGB(196, 26, 22);  // red
-        case sqlcore::SyntaxToken::Comment: return RGB(34, 139, 34);    // green
+        case sqlcore::SyntaxToken::Keyword: return RGB(199, 37, 108);
+        case sqlcore::SyntaxToken::Number: return RGB(128, 0, 128);
+        case sqlcore::SyntaxToken::StringLiteral: return RGB(196, 26, 22);
+        case sqlcore::SyntaxToken::Comment: return RGB(34, 139, 34);
     }
     return GetSysColor(COLOR_WINDOWTEXT);
 }
 
-// Editor text with RichEdit's single-CR line breaks normalized to '\n' (1:1, so
-// character offsets still line up with EM_EXSETSEL). SqlCore expects '\n'.
 std::wstring editorText(HWND edit) {
     GETTEXTLENGTHEX gtl{};
     gtl.flags = GTL_NUMCHARS;
-    gtl.codepage = 1200;  // UTF-16
+    gtl.codepage = 1200;
     const LONG n = static_cast<LONG>(SendMessageW(edit, EM_GETTEXTLENGTHEX,
                                                   reinterpret_cast<WPARAM>(&gtl), 0));
     if (n <= 0) return std::wstring();
     std::wstring buf(static_cast<size_t>(n), L'\0');
     GETTEXTEX gt{};
     gt.cb = static_cast<DWORD>((n + 1) * sizeof(wchar_t));
-    gt.flags = GT_DEFAULT;  // single '\r' line breaks
+    gt.flags = GT_DEFAULT;
     gt.codepage = 1200;
     const LONG got = static_cast<LONG>(SendMessageW(
         edit, EM_GETTEXTEX, reinterpret_cast<WPARAM>(&gt), reinterpret_cast<LPARAM>(buf.data())));
@@ -131,8 +157,7 @@ void applyHighlight(AppState* st) {
     SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
 
     for (const auto& s : spans) {
-        CHARRANGE cr{static_cast<LONG>(s.location),
-                     static_cast<LONG>(s.location + s.length)};
+        CHARRANGE cr{static_cast<LONG>(s.location), static_cast<LONG>(s.location + s.length)};
         SendMessageW(e, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
         CHARFORMAT2W cf{};
         cf.cbSize = sizeof(cf);
@@ -149,6 +174,16 @@ void applyHighlight(AppState* st) {
 
 void setStatus(AppState* st, const std::wstring& text) {
     SendMessageW(st->hStatus, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+void updateFlags(AppState* st) {
+    std::wstring f;
+    if (st->readOnly) f += L"read-only";
+    if (st->inTransaction) {
+        if (!f.empty()) f += L"  ·  ";
+        f += L"in transaction";
+    }
+    SendMessageW(st->hStatus, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(f.c_str()));
 }
 
 void setTitle(AppState* st) {
@@ -182,6 +217,12 @@ void layout(AppState* st) {
     MoveWindow(st->hList, 0, 0, cw, listH, TRUE);
     MoveWindow(st->hSplitter, 0, listH, cw, kSplitterHeight, TRUE);
     MoveWindow(st->hEdit, 0, listH + kSplitterHeight, cw, editH, TRUE);
+
+    if (st->hStatus) {
+        int parts[2] = {cw - 180, -1};
+        SendMessageW(st->hStatus, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
+        updateFlags(st);
+    }
 }
 
 void clearGrid(HWND list) {
@@ -206,8 +247,7 @@ void populateGrid(HWND list, const QueryResult& r) {
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(row);
-        item.pszText = cells.empty() ? const_cast<LPWSTR>(L"")
-                                     : const_cast<LPWSTR>(cells[0].c_str());
+        item.pszText = cells.empty() ? const_cast<LPWSTR>(L"") : const_cast<LPWSTR>(cells[0].c_str());
         ListView_InsertItem(list, &item);
         for (size_t c = 1; c < cells.size(); ++c)
             ListView_SetItemText(list, static_cast<int>(row), static_cast<int>(c),
@@ -224,8 +264,7 @@ void showResult(AppState* st, const QueryResult& r) {
     if (!r.columns.empty()) {
         populateGrid(st->hList, r);
         std::swprintf(buf, 160, L"%llu rows · %.0f ms",
-                      static_cast<unsigned long long>(r.rows.size()),
-                      r.executionTimeSec * 1000.0);
+                      static_cast<unsigned long long>(r.rows.size()), r.executionTimeSec * 1000.0);
     } else {
         clearGrid(st->hList);
         std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
@@ -245,19 +284,45 @@ void startExecute(AppState* st, const std::wstring& sql) {
     });
 }
 
-void doRunWhole(AppState* st) {
-    if (!st->session.isConnected()) {
-        setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
-        return;
-    }
-    if (st->busy) {
-        setStatus(st, L"A query is already running — Ctrl+. to cancel.");
-        return;
-    }
-    startExecute(st, editorText(st->hEdit));
+void doReconnect(AppState* st, const std::wstring& dbName) {
+    DatabaseConnection cfg = st->currentConnection;
+    cfg.databaseName = dbName;
+    st->pendingConn = cfg;
+    st->pendingSaveAs = std::nullopt;
+    st->pendingRemember = false;
+    st->pendingTouchCredentials = false;
+    setStatus(st, L"Switching to \"" + dbName + L"\"…");
+    HWND hwnd = st->hwnd;
+    st->session.connectAsync(cfg, [hwnd](bool ok, std::wstring err) {
+        auto* m = new ConnectMsg{ok, std::move(err)};
+        if (!PostMessageW(hwnd, WM_APP_CONNECTED, 0, reinterpret_cast<LPARAM>(m))) delete m;
+    });
 }
 
-void doRunStatement(AppState* st) {
+// Apply the read-only block / destructive confirm, then run.
+void guardAndRun(AppState* st, const std::vector<std::wstring>& statements) {
+    const GuardDecision d = evaluateGuard(statements, st->readOnly);
+    if (d.action == GuardAction::Block) {
+        setStatus(st, d.message);
+        return;
+    }
+    if (d.action == GuardAction::Confirm) {
+        if (MessageBoxW(st->hwnd, d.message.c_str(), L"Confirm destructive statement",
+                        MB_YESNO | MB_ICONWARNING) != IDYES) {
+            setStatus(st, L"Cancelled — destructive statement not run.");
+            return;
+        }
+    }
+    st->lastRunStatements = statements;
+    std::wstring joined;
+    for (size_t i = 0; i < statements.size(); ++i) {
+        if (i) joined += L"\n";
+        joined += statements[i];
+    }
+    startExecute(st, joined);
+}
+
+void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool recordHistory = true) {
     if (!st->session.isConnected()) {
         setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
         return;
@@ -266,14 +331,48 @@ void doRunStatement(AppState* st) {
         setStatus(st, L"A query is already running — Ctrl+. to cancel.");
         return;
     }
-    const std::wstring text = editorText(st->hEdit);
-    const auto stmt =
-        sqlcore::SqlStatementSplitter::statementAtOffset(caretOffset(st->hEdit), text);
-    if (stmt) {
-        startExecute(st, *stmt);
+    const std::wstring input = normalizeSmartCharacters(rawText);
+    if (input.empty()) return;
+
+    st->cmdHistory.add(input);
+    if (recordHistory) QueryHistoryStore::record(input, epochNow());
+    if (clearAfter) SetWindowTextW(st->hEdit, L"");
+
+    if (auto dot = handleDotCommand(input, st->currentEngine)) {
+        switch (dot->kind) {
+            case DotKind::Sql:
+            case DotKind::MultiSql:
+                guardAndRun(st, dot->statements);
+                break;
+            case DotKind::Message:
+                MessageBoxW(st->hwnd, dot->text.c_str(), L"SQLTerminal", MB_OK | MB_ICONINFORMATION);
+                break;
+            case DotKind::Clear:
+                clearGrid(st->hList);
+                setStatus(st, L"Cleared.");
+                break;
+            case DotKind::Reconnect:
+                doReconnect(st, dot->text);
+                break;
+        }
     } else {
-        setStatus(st, L"No statement under the cursor.");
+        guardAndRun(st, {input});
     }
+}
+
+void doRunWhole(AppState* st) { runText(st, editorText(st->hEdit), /*clearAfter=*/true); }
+
+void doRunStatement(AppState* st) {
+    const std::wstring text = editorText(st->hEdit);
+    const auto stmt = sqlcore::SqlStatementSplitter::statementAtOffset(caretOffset(st->hEdit), text);
+    if (stmt && !stmt->empty())
+        runText(st, *stmt, /*clearAfter=*/false);
+    else
+        runText(st, text, /*clearAfter=*/true);
+}
+
+void doTransaction(AppState* st, const std::wstring& keyword) {
+    runText(st, keyword, /*clearAfter=*/false, /*recordHistory=*/false);
 }
 
 void doCancel(AppState* st) {
@@ -283,6 +382,41 @@ void doCancel(AppState* st) {
     setStatus(st, L"Cancelling…");
 }
 
+void doHistoryUp(AppState* st) {
+    if (auto t = st->cmdHistory.up(editorText(st->hEdit))) SetWindowTextW(st->hEdit, t->c_str());
+}
+void doHistoryDown(AppState* st) {
+    if (auto t = st->cmdHistory.down()) SetWindowTextW(st->hEdit, t->c_str());
+}
+
+void toggleReadOnly(AppState* st) {
+    st->readOnly = !st->readOnly;
+    CheckMenuItem(GetMenu(st->hwnd), ID_READONLY, st->readOnly ? MF_CHECKED : MF_UNCHECKED);
+    updateFlags(st);
+}
+
+void applyConnectionPersistence(AppState* st) {
+    const DatabaseConnection& c = st->pendingConn;
+    st->currentConnection = c;
+    st->currentEngine = c.engine;
+    st->inTransaction = false;
+    if (c.engine == DatabaseEngine::Sqlite) {
+        const size_t slash = c.filePath.find_last_of(L"\\/");
+        st->dbName = (slash == std::wstring::npos) ? c.filePath : c.filePath.substr(slash + 1);
+    } else {
+        st->dbName = c.databaseName;
+    }
+    RecentConnectionsStore::add(ConnectionProfile(c));
+    if (st->pendingSaveAs) SavedProfilesStore::save(ConnectionProfile(c, st->pendingSaveAs));
+    if (st->pendingTouchCredentials && c.engine == DatabaseEngine::Postgres) {
+        const std::wstring acct = CredentialStore::accountKey(c);
+        if (st->pendingRemember && !c.password.empty())
+            CredentialStore::savePassword(acct, c.password);
+        else
+            CredentialStore::deletePassword(acct);
+    }
+}
+
 void doOpen(AppState* st) {
     if (st->busy) {
         setStatus(st, L"A query is running — Ctrl+. to cancel before opening.");
@@ -290,8 +424,10 @@ void doOpen(AppState* st) {
     }
     auto req = showConnectionDialog(st->hwnd);
     if (!req) return;
-
-    st->pendingRequest = req;
+    st->pendingConn = req->connection;
+    st->pendingSaveAs = req->saveAsName;
+    st->pendingRemember = req->rememberPassword;
+    st->pendingTouchCredentials = true;
     setStatus(st, L"Connecting…");
     HWND hwnd = st->hwnd;
     st->session.connectAsync(req->connection, [hwnd](bool ok, std::wstring err) {
@@ -300,55 +436,29 @@ void doOpen(AppState* st) {
     });
 }
 
-// Record recents / save profile / store-or-clear password after a successful connect.
-void applyConnectionPersistence(AppState* st) {
-    if (!st->pendingRequest) return;
-    const DatabaseConnection& c = st->pendingRequest->connection;
-    if (c.engine == DatabaseEngine::Sqlite) {
-        const size_t slash = c.filePath.find_last_of(L"\\/");
-        st->dbName = (slash == std::wstring::npos) ? c.filePath : c.filePath.substr(slash + 1);
-    } else {
-        st->dbName = c.databaseName;
-    }
-    RecentConnectionsStore::add(ConnectionProfile(c));
-    if (st->pendingRequest->saveAsName)
-        SavedProfilesStore::save(ConnectionProfile(c, st->pendingRequest->saveAsName));
-    if (c.engine == DatabaseEngine::Postgres) {
-        const std::wstring acct = CredentialStore::accountKey(c);
-        if (st->pendingRequest->rememberPassword && !c.password.empty())
-            CredentialStore::savePassword(acct, c.password);
-        else
-            CredentialStore::deletePassword(acct);
-    }
-}
-
 void createChildren(AppState* st, HINSTANCE hInst) {
     st->hList = CreateWindowExW(0, WC_LISTVIEW, L"",
-                                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
-                                0, 0, 0, 0, st->hwnd,
-                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
+                                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS, 0, 0, 0, 0,
+                                st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
                                 hInst, nullptr);
     ListView_SetExtendedListViewStyle(
         st->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
-    st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0,
-                                    0, st->hwnd,
-                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
+    st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                                    st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
                                     hInst, nullptr);
     SetWindowLongPtrW(st->hSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
     st->hEdit = CreateWindowExW(
         WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL |
-            ES_WANTRETURN | ES_NOHIDESEL,
-        0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)),
-        hInst, nullptr);
-    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0,
-                 static_cast<LPARAM>(GetSysColor(COLOR_WINDOW)));
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
+            ES_NOHIDESEL,
+        0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)), hInst, nullptr);
+    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(GetSysColor(COLOR_WINDOW)));
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
     cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR;
-    cf.yHeight = 220;  // ~11pt (twips)
+    cf.yHeight = 220;
     cf.crTextColor = GetSysColor(COLOR_WINDOWTEXT);
     lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
     SendMessageW(st->hEdit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
@@ -356,9 +466,8 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     SendMessageW(st->hEdit, EM_SETEVENTMASK, 0, ENM_CHANGE);
     applyHighlight(st);
 
-    st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready", WS_CHILD | WS_VISIBLE,
-                                  0, 0, 0, 0, st->hwnd,
-                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
+    st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                                  st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                   hInst, nullptr);
     setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
 }
@@ -370,11 +479,17 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, ID_EXIT, L"E&xit");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
+
     HMENU query = CreatePopupMenu();
     AppendMenuW(query, MF_STRING, ID_RUN, L"&Run\tCtrl+E");
     AppendMenuW(query, MF_STRING, ID_RUN_STMT, L"Run &Statement at Cursor\tCtrl+Enter");
-    AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(query, MF_STRING, ID_CANCEL, L"&Cancel Running Query\tCtrl+.");
+    AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(query, MF_STRING, ID_READONLY, L"Read-&only mode");
+    AppendMenuW(query, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(query, MF_STRING, ID_TX_BEGIN, L"&Begin Transaction");
+    AppendMenuW(query, MF_STRING, ID_TX_COMMIT, L"Co&mmit Transaction");
+    AppendMenuW(query, MF_STRING, ID_TX_ROLLBACK, L"Roll&back Transaction");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
     SetMenu(hwnd, bar);
 }
@@ -436,19 +551,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             const int code = HIWORD(wParam);
-            if (reinterpret_cast<HWND>(lParam) == st->hEdit && code == EN_CHANGE) {
+            if (reinterpret_cast<HWND>(lParam) == st->hEdit && code == EN_CHANGE)
                 applyHighlight(st);
-            } else if (id == ID_OPEN) {
-                doOpen(st);
-            } else if (id == ID_RUN) {
-                doRunWhole(st);
-            } else if (id == ID_RUN_STMT) {
-                doRunStatement(st);
-            } else if (id == ID_CANCEL) {
-                doCancel(st);
-            } else if (id == ID_EXIT) {
-                DestroyWindow(hwnd);
-            }
+            else if (id == ID_OPEN) doOpen(st);
+            else if (id == ID_RUN) doRunWhole(st);
+            else if (id == ID_RUN_STMT) doRunStatement(st);
+            else if (id == ID_CANCEL) doCancel(st);
+            else if (id == ID_READONLY) toggleReadOnly(st);
+            else if (id == ID_TX_BEGIN) doTransaction(st, L"BEGIN");
+            else if (id == ID_TX_COMMIT) doTransaction(st, L"COMMIT");
+            else if (id == ID_TX_ROLLBACK) doTransaction(st, L"ROLLBACK");
+            else if (id == ID_HIST_UP) doHistoryUp(st);
+            else if (id == ID_HIST_DOWN) doHistoryDown(st);
+            else if (id == ID_EXIT) DestroyWindow(hwnd);
             return 0;
         }
         case WM_APP_RESULT: {
@@ -456,10 +571,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             st->busy = false;
             if (st->cancelRequested) {
                 setStatus(st, L"Query cancelled.");
-            } else if (r->error) {
-                setStatus(st, L"Error: " + *r->error);
             } else {
-                showResult(st, *r);
+                if (r->error)
+                    setStatus(st, L"Error: " + *r->error);
+                else
+                    showResult(st, *r);
+                st->inTransaction = updateInTransaction(st->inTransaction, st->lastRunStatements);
+                updateFlags(st);
             }
             st->cancelRequested = false;
             delete r;
@@ -472,12 +590,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 clearGrid(st->hList);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
+                updateFlags(st);
             } else {
-                MessageBoxW(hwnd, m->error.c_str(), L"Connection failed",
-                            MB_ICONERROR | MB_OK);
+                MessageBoxW(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
             }
-            st->pendingRequest.reset();
             delete m;
             return 0;
         }
@@ -485,6 +602,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (st && st->hEdit) SetFocus(st->hEdit);
             return 0;
         case WM_DESTROY:
+            if (st && st->hMono) DeleteObject(st->hMono);
             PostQuitMessage(0);
             return 0;
     }
@@ -496,11 +614,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int runApp(HINSTANCE hInstance, int nCmdShow) {
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES |
-                ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES |
+                ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
 
-    // RichEdit 4.1 (MSFTEDIT_CLASS / "RICHEDIT50W") lives in Msftedit.dll.
     if (!LoadLibraryW(L"Msftedit.dll")) {
         MessageBoxW(nullptr, L"Failed to load Msftedit.dll (RichEdit).", L"SQLTerminal",
                     MB_ICONERROR | MB_OK);
@@ -526,9 +643,8 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     if (!RegisterClassExW(&wc)) return 1;
 
     AppState state;
-    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1100, 750, nullptr, nullptr,
-                                hInstance, &state);
+    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 1100, 750, nullptr, nullptr, hInstance, &state);
     if (!hwnd) return 1;
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
@@ -538,6 +654,8 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
         {FCONTROL | FVIRTKEY, static_cast<WORD>('O'), ID_OPEN},
         {FCONTROL | FVIRTKEY, VK_RETURN, ID_RUN_STMT},
         {FCONTROL | FVIRTKEY, VK_OEM_PERIOD, ID_CANCEL},
+        {FCONTROL | FVIRTKEY, VK_UP, ID_HIST_UP},
+        {FCONTROL | FVIRTKEY, VK_DOWN, ID_HIST_DOWN},
     };
     HACCEL hAccel = CreateAcceleratorTableW(accels, static_cast<int>(sizeof(accels) /
                                                                      sizeof(accels[0])));

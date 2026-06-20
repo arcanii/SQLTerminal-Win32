@@ -150,7 +150,7 @@ add_executable(SQLTerminal WIN32
   src/WinMain.cpp
   src/ui/MainWindow.cpp
   src/ui/ConnectionDialog.cpp)
-target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore SqlStore comctl32 comdlg32)
+target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore SqlStore SqlApp comctl32 comdlg32)
 sqlt_copy_pg_dlls(SQLTerminal)
 
 # Future phases (P4) will add find_package(PostgreSQL)/libpq + nlohmann_json via
