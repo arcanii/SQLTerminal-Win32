@@ -32,6 +32,7 @@
 #include "models/DatabaseEngine.h"
 #include "models/QueryResult.h"
 #include "persistence/Stores.h"
+#include "platform/Updater.h"
 #include "security/CredentialStore.h"
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
@@ -71,6 +72,7 @@ enum : int {
     ID_CLOSE = 1024,
     ID_ABOUT = 1025,
     ID_HELP = 1026,
+    ID_CHECK_UPDATES = 1027,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -629,7 +631,9 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
 
     HMENU help = CreatePopupMenu();
+    AppendMenuW(help, MF_STRING, ID_CHECK_UPDATES, L"Check for &Updates…");
     AppendMenuW(help, MF_STRING, ID_HELP, L"SQLTerminal &Help\tF1");
+    AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(help, MF_STRING, ID_ABOUT, L"&About SQLTerminal");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
     SetMenu(hwnd, bar);
@@ -962,6 +966,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 doAbout(hwnd);
             } else if (id == ID_HELP) {
                 doHelp(hwnd);
+            } else if (id == ID_CHECK_UPDATES) {
+                checkForUpdates();
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
@@ -1146,6 +1152,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
 
     g_appInstance = hInstance;
     if (!createMainWindow(nCmdShow)) return 1;
+    initUpdater();
 
     ACCEL accels[] = {
         {FCONTROL | FVIRTKEY, static_cast<WORD>('E'), ID_RUN},
@@ -1171,6 +1178,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
         }
     }
     if (hAccel) DestroyAcceleratorTable(hAccel);
+    shutdownUpdater();
     return static_cast<int>(msg.wParam);
 }
 

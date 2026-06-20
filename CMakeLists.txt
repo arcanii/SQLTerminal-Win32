@@ -68,6 +68,16 @@ function(sqlt_copy_pg_dlls target)
 endfunction()
 
 # ---------------------------------------------------------------------------
+# WinSparkle (auto-update) — vendored prebuilt DLL/lib/header.
+# ---------------------------------------------------------------------------
+set(WS_DIR "${CMAKE_SOURCE_DIR}/third_party/winsparkle")
+add_library(WinSparkle SHARED IMPORTED)
+set_target_properties(WinSparkle PROPERTIES
+  IMPORTED_IMPLIB "${WS_DIR}/lib/WinSparkle.lib"
+  IMPORTED_LOCATION "${WS_DIR}/bin/WinSparkle.dll"
+  INTERFACE_INCLUDE_DIRECTORIES "${WS_DIR}/include")
+
+# ---------------------------------------------------------------------------
 # SqlDb — engine providers (SqliteProvider, PostgresProvider) + DatabaseSession.
 # ---------------------------------------------------------------------------
 add_library(SqlDb STATIC
@@ -153,9 +163,19 @@ add_executable(SQLTerminal WIN32
   src/ui/MainWindow.cpp
   src/ui/ConnectionDialog.cpp
   src/ui/CellDetailDialog.cpp
-  src/ui/HistoryDialog.cpp)
-target_link_libraries(SQLTerminal PRIVATE SqlDb SqlCore SqlStore SqlApp comctl32 comdlg32)
+  src/ui/HistoryDialog.cpp
+  src/platform/Updater.cpp
+  packaging/SQLTerminal.rc)
+target_link_libraries(SQLTerminal PRIVATE
+  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32)
+# Our manifest is embedded via the .rc; stop the linker generating a competing one.
+if(MSVC)
+  target_link_options(SQLTerminal PRIVATE /MANIFEST:NO)
+endif()
 sqlt_copy_pg_dlls(SQLTerminal)
+add_custom_command(TARGET SQLTerminal POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WS_DIR}/bin/WinSparkle.dll"
+          "$<TARGET_FILE_DIR:SQLTerminal>")
 
 # Future phases (P4) will add find_package(PostgreSQL)/libpq + nlohmann_json via
 # the vcpkg toolchain (declared in vcpkg.json).

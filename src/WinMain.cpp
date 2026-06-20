@@ -12,13 +12,8 @@
 #include "ui/MainWindow.h"
 
 #pragma comment(lib, "comctl32.lib")
-// Pull in the Common Controls v6 (themed) side-by-side assembly.
-#pragma comment(                                                          \
-    linker,                                                               \
-    "\"/manifestdependency:type='win32' "                                \
-    "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' "        \
-    "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' "        \
-    "language='*'\"")
+// Common Controls v6 + DPI awareness come from the embedded app manifest
+// (packaging/app.manifest via SQLTerminal.rc).
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     return sqlterm::runApp(hInstance, nCmdShow);
