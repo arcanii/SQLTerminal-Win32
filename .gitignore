@@ -1,0 +1,29 @@
+# Build output
+/build/
+/out/
+[Bb]uild/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# vcpkg
+/vcpkg_installed/
+
+# Visual Studio
+.vs/
+*.user
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

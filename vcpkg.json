@@ -1,0 +1,13 @@
+{
+  "name": "sqlterminal-win32",
+  "version": "0.1.0",
+  "description": "Native Win32 port of SQLTerminal (SQLite/PostgreSQL query terminal).",
+  "homepage": "https://github.com/arcanii/SQLTerminal",
+  "license": "GPL-3.0-or-later",
+  "dependencies": [
+    "libpq",
+    "nlohmann-json"
+  ],
+  "builtin-baseline": "",
+  "$note": "Declared for P4+ (PostgreSQL via libpq) and P5 (JSON persistence). P0/P1 build with no vcpkg deps. SQLite is vendored as third_party/sqlite/sqlite3.c rather than a vcpkg port. To enable: set a builtin-baseline (vcpkg x-update-baseline) and configure with the vcpkg CMake toolchain file."
+}
