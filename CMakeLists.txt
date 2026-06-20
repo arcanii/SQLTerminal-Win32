@@ -78,6 +78,16 @@ target_include_directories(SqlDb PUBLIC src)
 target_link_libraries(SqlDb PUBLIC sqlite3 SqlCore PostgreSQL::PostgreSQL)
 
 # ---------------------------------------------------------------------------
+# SqlStore — JSON persistence (%APPDATA%) + Windows Credential Manager.
+# ---------------------------------------------------------------------------
+add_library(SqlStore STATIC
+  src/persistence/Stores.cpp
+  src/security/CredentialStore.cpp)
+target_include_directories(SqlStore PUBLIC src)
+target_include_directories(SqlStore PRIVATE third_party/json)
+target_link_libraries(SqlStore PUBLIC advapi32 shell32 ole32)
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()
@@ -112,6 +122,11 @@ add_test(NAME PostgresLiveTest COMMAND PostgresLiveTest)
 sqlt_copy_pg_dlls(SqlDbTests)
 sqlt_copy_pg_dlls(SqlSessionTests)
 sqlt_copy_pg_dlls(PostgresLiveTest)
+
+add_executable(SqlStoreTests tests/store_tests.cpp)
+target_link_libraries(SqlStoreTests PRIVATE SqlStore)
+target_include_directories(SqlStoreTests PRIVATE tests)
+add_test(NAME SqlStoreTests COMMAND SqlStoreTests)
 
 # ---------------------------------------------------------------------------
 # SQLTerminal — the Win32 GUI app.
