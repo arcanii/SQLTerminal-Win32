@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// P1 main window: a results ListView (top), a SQL edit control (bottom), and a
-// Run button. Connect via File > Open Database, run with Ctrl+E. Execution is
-// synchronous on the UI thread here; P3 moves it to a worker thread.
+// P2 main window: a results ListView (top), a draggable splitter, and a RichEdit
+// SQL editor (bottom) with live syntax highlighting, plus a status bar. Run the
+// whole editor with Ctrl+E or the statement under the cursor with Ctrl+Enter.
+// Execution is still synchronous on the UI thread (P3 moves it off-thread).
 #include "ui/MainWindow.h"
 
 #include <commctrl.h>
-#include <commdlg.h>  // GetOpenFileNameW / OPENFILENAMEW
+#include <commdlg.h>
 
+#define _RICHEDIT_VER 0x0500
+#include <richedit.h>
+
+#include <algorithm>
 #include <cstdio>
+#include <optional>
 #include <string>
 
+#include "core/SqlStatementSplitter.h"
+#include "core/SqlSyntaxHighlighter.h"
 #include "db/SqliteProvider.h"
 #include "models/DatabaseConnection.h"
 #include "models/QueryResult.h"
@@ -18,55 +26,144 @@ namespace sqlterm {
 namespace {
 
 constexpr wchar_t kClassName[] = L"SQLTerminalMainWindow";
+constexpr wchar_t kSplitterClass[] = L"SQLTerminalSplitter";
 
 enum : int {
     ID_OPEN = 1001,
     ID_EXIT = 1002,
     ID_RUN = 1003,
+    ID_RUN_STMT = 1004,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
-    IDC_RUNBTN = 2003,
+    IDC_SPLIT = 2004,
+    IDC_STATUS = 2005,
 };
 
-constexpr int kEditHeight = 150;
-constexpr int kStripHeight = 36;
+constexpr int kSplitterHeight = 6;
+constexpr int kMinEditor = 80;
+constexpr int kMinList = 100;
 
 struct AppState {
     HWND hwnd = nullptr;
     HWND hList = nullptr;
-    HWND hEdit = nullptr;
-    HWND hButton = nullptr;
-    HFONT hMono = nullptr;
+    HWND hEdit = nullptr;     // RichEdit
+    HWND hSplitter = nullptr;
+    HWND hStatus = nullptr;
+    int editorHeight = 150;   // user-draggable
+    bool suppressHighlight = false;
     SqliteProvider provider;
     std::wstring dbName;
 };
 
-std::wstring getEditText(HWND edit) {
-    const int len = GetWindowTextLengthW(edit);
-    std::wstring s;
-    if (len <= 0) return s;
-    s.resize(static_cast<size_t>(len));
-    GetWindowTextW(edit, &s[0], len + 1);  // writes len chars + terminator
-    return s;
+COLORREF colorFor(sqlcore::SyntaxToken t) {
+    switch (t) {
+        case sqlcore::SyntaxToken::Keyword: return RGB(199, 37, 108);   // pink
+        case sqlcore::SyntaxToken::Number: return RGB(128, 0, 128);     // purple
+        case sqlcore::SyntaxToken::StringLiteral: return RGB(196, 26, 22);  // red
+        case sqlcore::SyntaxToken::Comment: return RGB(34, 139, 34);    // green
+    }
+    return GetSysColor(COLOR_WINDOWTEXT);
 }
 
-void setTitle(AppState* st, const std::wstring& extra) {
+// Editor text with RichEdit's single-CR line breaks normalized to '\n' (1:1, so
+// character offsets still line up with EM_EXSETSEL). SqlCore expects '\n'.
+std::wstring editorText(HWND edit) {
+    GETTEXTLENGTHEX gtl{};
+    gtl.flags = GTL_NUMCHARS;
+    gtl.codepage = 1200;  // UTF-16
+    const LONG n = static_cast<LONG>(SendMessageW(edit, EM_GETTEXTLENGTHEX,
+                                                  reinterpret_cast<WPARAM>(&gtl), 0));
+    if (n <= 0) return std::wstring();
+    std::wstring buf(static_cast<size_t>(n), L'\0');
+    GETTEXTEX gt{};
+    gt.cb = static_cast<DWORD>((n + 1) * sizeof(wchar_t));
+    gt.flags = GT_DEFAULT;  // single '\r' line breaks
+    gt.codepage = 1200;
+    const LONG got = static_cast<LONG>(SendMessageW(
+        edit, EM_GETTEXTEX, reinterpret_cast<WPARAM>(&gt), reinterpret_cast<LPARAM>(buf.data())));
+    buf.resize(static_cast<size_t>(got));
+    for (auto& c : buf)
+        if (c == L'\r') c = L'\n';
+    return buf;
+}
+
+LONG caretOffset(HWND edit) {
+    CHARRANGE cr{};
+    SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+    return cr.cpMin;
+}
+
+void applyHighlight(AppState* st) {
+    if (st->suppressHighlight) return;
+    st->suppressHighlight = true;
+    HWND e = st->hEdit;
+
+    CHARRANGE saved{};
+    SendMessageW(e, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    SendMessageW(e, WM_SETREDRAW, FALSE, 0);
+
+    const std::wstring text = editorText(e);
+    const auto spans = sqlcore::SqlSyntaxHighlighter::computeSpans(text);
+
+    CHARFORMAT2W base{};
+    base.cbSize = sizeof(base);
+    base.dwMask = CFM_COLOR;
+    base.crTextColor = GetSysColor(COLOR_WINDOWTEXT);
+    SendMessageW(e, EM_SETSEL, 0, -1);
+    SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
+
+    for (const auto& s : spans) {
+        CHARRANGE cr{static_cast<LONG>(s.location),
+                     static_cast<LONG>(s.location + s.length)};
+        SendMessageW(e, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR;
+        cf.crTextColor = colorFor(s.type);
+        SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+    }
+
+    SendMessageW(e, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
+    SendMessageW(e, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(e, nullptr, TRUE);
+    st->suppressHighlight = false;
+}
+
+void setStatus(AppState* st, const std::wstring& text) {
+    SendMessageW(st->hStatus, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+void setTitle(AppState* st) {
     std::wstring title = L"SQLTerminal";
     if (!st->dbName.empty()) title += L" — " + st->dbName;
-    if (!extra.empty()) title += L"   [" + extra + L"]";
     SetWindowTextW(st->hwnd, title.c_str());
 }
 
+int statusHeight(AppState* st) {
+    if (!st->hStatus) return 0;
+    RECT r;
+    GetWindowRect(st->hStatus, &r);
+    return r.bottom - r.top;
+}
+
 void layout(AppState* st) {
+    if (st->hStatus) SendMessageW(st->hStatus, WM_SIZE, 0, 0);
     RECT rc;
     GetClientRect(st->hwnd, &rc);
     const int cw = rc.right;
-    const int ch = rc.bottom;
-    int listH = ch - kEditHeight - kStripHeight;
+    const int ch = (std::max)(0L, static_cast<long>(rc.bottom - statusHeight(st)));
+
+    int editH = st->editorHeight;
+    int maxEdit = ch - kMinList - kSplitterHeight;
+    if (maxEdit < kMinEditor) maxEdit = (std::max)(0, ch - kSplitterHeight);
+    if (editH > maxEdit) editH = maxEdit;
+    if (editH < 0) editH = 0;
+    int listH = ch - editH - kSplitterHeight;
     if (listH < 0) listH = 0;
+
     MoveWindow(st->hList, 0, 0, cw, listH, TRUE);
-    MoveWindow(st->hEdit, 0, listH, cw, kEditHeight, TRUE);
-    MoveWindow(st->hButton, cw - 130, listH + kEditHeight + 5, 120, 26, TRUE);
+    MoveWindow(st->hSplitter, 0, listH, cw, kSplitterHeight, TRUE);
+    MoveWindow(st->hEdit, 0, listH + kSplitterHeight, cw, editH, TRUE);
 }
 
 void clearGrid(HWND list) {
@@ -91,20 +188,59 @@ void populateGrid(HWND list, const QueryResult& r) {
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(row);
-        item.iSubItem = 0;
         item.pszText = cells.empty() ? const_cast<LPWSTR>(L"")
                                      : const_cast<LPWSTR>(cells[0].c_str());
         ListView_InsertItem(list, &item);
-        for (size_t c = 1; c < cells.size(); ++c) {
+        for (size_t c = 1; c < cells.size(); ++c)
             ListView_SetItemText(list, static_cast<int>(row), static_cast<int>(c),
                                  const_cast<LPWSTR>(cells[c].c_str()));
-        }
     }
-    for (size_t i = 0; i < r.columns.size(); ++i) {
+    for (size_t i = 0; i < r.columns.size(); ++i)
         ListView_SetColumnWidth(list, static_cast<int>(i), LVSCW_AUTOSIZE_USEHEADER);
-    }
     SendMessageW(list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(list, nullptr, TRUE);
+}
+
+void doExecute(AppState* st, const std::wstring& sql) {
+    const QueryResult r = st->provider.execute(sql);
+    if (r.error) {
+        setStatus(st, L"Error: " + *r.error);
+        return;
+    }
+    wchar_t buf[160];
+    if (!r.columns.empty()) {
+        populateGrid(st->hList, r);
+        std::swprintf(buf, 160, L"%llu rows · %.0f ms",
+                      static_cast<unsigned long long>(r.rows.size()),
+                      r.executionTimeSec * 1000.0);
+    } else {
+        clearGrid(st->hList);
+        std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
+                      r.executionTimeSec * 1000.0);
+    }
+    setStatus(st, buf);
+}
+
+void doRunWhole(AppState* st) {
+    if (!st->provider.isConnected()) {
+        setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
+        return;
+    }
+    doExecute(st, editorText(st->hEdit));
+}
+
+void doRunStatement(AppState* st) {
+    if (!st->provider.isConnected()) {
+        setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
+        return;
+    }
+    const std::wstring text = editorText(st->hEdit);
+    const auto stmt = sqlcore::SqlStatementSplitter::statementAtOffset(caretOffset(st->hEdit), text);
+    if (stmt) {
+        doExecute(st, *stmt);
+    } else {
+        setStatus(st, L"No statement under the cursor.");
+    }
 }
 
 void doOpen(AppState* st) {
@@ -125,40 +261,15 @@ void doOpen(AppState* st) {
     std::wstring err;
     if (!st->provider.connect(cfg, err)) {
         MessageBoxW(st->hwnd, err.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
+        setStatus(st, L"Connection failed.");
         return;
     }
-
     const std::wstring path = file;
     const size_t slash = path.find_last_of(L"\\/");
     st->dbName = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
     clearGrid(st->hList);
-    setTitle(st, L"connected");
-}
-
-void doRun(AppState* st) {
-    if (!st->provider.isConnected()) {
-        MessageBoxW(st->hwnd, L"Open a database first (File ▸ Open Database…).",
-                    L"No connection", MB_ICONINFORMATION | MB_OK);
-        return;
-    }
-    const QueryResult r = st->provider.execute(getEditText(st->hEdit));
-    if (r.error) {
-        MessageBoxW(st->hwnd, r.error->c_str(), L"Query error", MB_ICONERROR | MB_OK);
-        setTitle(st, L"error");
-        return;
-    }
-    wchar_t buf[160];
-    if (!r.columns.empty()) {
-        populateGrid(st->hList, r);
-        std::swprintf(buf, 160, L"%llu rows · %.0f ms",
-                      static_cast<unsigned long long>(r.rows.size()),
-                      r.executionTimeSec * 1000.0);
-    } else {
-        clearGrid(st->hList);
-        std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
-                      r.executionTimeSec * 1000.0);
-    }
-    setTitle(st, buf);
+    setTitle(st);
+    setStatus(st, st->provider.statusMessage());
 }
 
 void createChildren(AppState* st, HINSTANCE hInst) {
@@ -170,25 +281,36 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     ListView_SetExtendedListViewStyle(
         st->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
+    st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0,
+                                    0, st->hwnd,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
+                                    hInst, nullptr);
+    SetWindowLongPtrW(st->hSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+
     st->hEdit = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"SELECT 1;",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE |
-            ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN,
+        WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL |
+            ES_WANTRETURN | ES_NOHIDESEL,
         0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)),
         hInst, nullptr);
+    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0,
+                 static_cast<LPARAM>(GetSysColor(COLOR_WINDOW)));
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR;
+    cf.yHeight = 220;  // ~11pt (twips)
+    cf.crTextColor = GetSysColor(COLOR_WINDOWTEXT);
+    lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
+    SendMessageW(st->hEdit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+    SetWindowTextW(st->hEdit, L"SELECT * FROM users;");
+    SendMessageW(st->hEdit, EM_SETEVENTMASK, 0, ENM_CHANGE);
+    applyHighlight(st);
 
-    st->hButton = CreateWindowExW(0, L"BUTTON", L"Run (Ctrl+E)",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
-                                  st->hwnd,
-                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RUNBTN)),
+    st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready", WS_CHILD | WS_VISIBLE,
+                                  0, 0, 0, 0, st->hwnd,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                   hInst, nullptr);
-
-    st->hMono = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            FIXED_PITCH | FF_MODERN, L"Consolas");
-    if (st->hMono) SendMessageW(st->hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
-    SendMessageW(st->hButton, WM_SETFONT,
-                 reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+    setStatus(st, L"No database — File ▸ Open Database… (Ctrl+O)");
 }
 
 void buildMenu(HWND hwnd) {
@@ -200,8 +322,39 @@ void buildMenu(HWND hwnd) {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     HMENU query = CreatePopupMenu();
     AppendMenuW(query, MF_STRING, ID_RUN, L"&Run\tCtrl+E");
+    AppendMenuW(query, MF_STRING, ID_RUN_STMT, L"Run &Statement at Cursor\tCtrl+Enter");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"&Query");
     SetMenu(hwnd, bar);
+}
+
+LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_LBUTTONDOWN:
+            SetCapture(hwnd);
+            return 0;
+        case WM_MOUSEMOVE:
+            if (st && (wParam & MK_LBUTTON) && GetCapture() == hwnd) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(st->hwnd, &pt);
+                RECT rc;
+                GetClientRect(st->hwnd, &rc);
+                const int ch = (std::max)(0L, static_cast<long>(rc.bottom - statusHeight(st)));
+                int newEdit = ch - kSplitterHeight - pt.y;
+                int maxEdit = ch - kMinList - kSplitterHeight;
+                if (maxEdit < kMinEditor) maxEdit = kMinEditor;
+                if (newEdit < kMinEditor) newEdit = kMinEditor;
+                if (newEdit > maxEdit) newEdit = maxEdit;
+                st->editorHeight = newEdit;
+                layout(st);
+            }
+            return 0;
+        case WM_LBUTTONUP:
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -230,17 +383,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
-            if (id == ID_OPEN) {
+            const int code = HIWORD(wParam);
+            if (reinterpret_cast<HWND>(lParam) == st->hEdit && code == EN_CHANGE) {
+                applyHighlight(st);
+            } else if (id == ID_OPEN) {
                 doOpen(st);
-            } else if (id == ID_RUN || id == IDC_RUNBTN) {
-                doRun(st);
+            } else if (id == ID_RUN) {
+                doRunWhole(st);
+            } else if (id == ID_RUN_STMT) {
+                doRunStatement(st);
             } else if (id == ID_EXIT) {
                 DestroyWindow(hwnd);
             }
             return 0;
         }
+        case WM_SETFOCUS:
+            if (st && st->hEdit) SetFocus(st->hEdit);
+            return 0;
         case WM_DESTROY:
-            if (st && st->hMono) DeleteObject(st->hMono);
             PostQuitMessage(0);
             return 0;
     }
@@ -255,6 +415,22 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     icc.dwICC = ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES |
                 ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
+
+    // RichEdit 4.1 (MSFTEDIT_CLASS / "RICHEDIT50W") lives in Msftedit.dll.
+    if (!LoadLibraryW(L"Msftedit.dll")) {
+        MessageBoxW(nullptr, L"Failed to load Msftedit.dll (RichEdit).", L"SQLTerminal",
+                    MB_ICONERROR | MB_OK);
+        return 1;
+    }
+
+    WNDCLASSEXW splitter{};
+    splitter.cbSize = sizeof(splitter);
+    splitter.lpfnWndProc = SplitterProc;
+    splitter.hInstance = hInstance;
+    splitter.lpszClassName = kSplitterClass;
+    splitter.hCursor = LoadCursorW(nullptr, IDC_SIZENS);
+    splitter.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    RegisterClassExW(&splitter);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -276,9 +452,10 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     ACCEL accels[] = {
         {FCONTROL | FVIRTKEY, static_cast<WORD>('E'), ID_RUN},
         {FCONTROL | FVIRTKEY, static_cast<WORD>('O'), ID_OPEN},
+        {FCONTROL | FVIRTKEY, VK_RETURN, ID_RUN_STMT},
     };
-    HACCEL hAccel = CreateAcceleratorTableW(
-        accels, static_cast<int>(sizeof(accels) / sizeof(accels[0])));
+    HACCEL hAccel = CreateAcceleratorTableW(accels, static_cast<int>(sizeof(accels) /
+                                                                     sizeof(accels[0])));
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

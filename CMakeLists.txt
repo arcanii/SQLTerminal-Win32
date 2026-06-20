@@ -27,6 +27,7 @@ add_library(SqlCore STATIC
   src/core/SqlStatementSplitter.cpp
   src/core/SqlStatementClassifier.cpp
   src/core/SqlLiteralScanner.cpp
+  src/core/SqlSyntaxHighlighter.cpp
   src/core/PostgresHba.cpp)
 target_include_directories(SqlCore PUBLIC src)
 

@@ -23,6 +23,11 @@ compile_commands.json
 .vs/
 *.user
 
+# Local database / sample data (user data, not source)
+*.db
+*.sqlite
+*.sqlite3
+
 # OS
 Thumbs.db
 desktop.ini

@@ -11,6 +11,7 @@
 #include "core/SqlLiteralScanner.h"
 #include "core/SqlStatementClassifier.h"
 #include "core/SqlStatementSplitter.h"
+#include "core/SqlSyntaxHighlighter.h"
 #include "test_harness.h"
 
 using namespace sqlcore;
@@ -63,6 +64,28 @@ static std::string dbg(const vector<SqlLiteralRange>& v) {
     return s + "]";
 }
 static std::string dbg(const vector<SqlStatementKind>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) s += ", ";
+        s += dbg(v[i]);
+    }
+    return s + "]";
+}
+
+static std::string dbg(SyntaxToken t) {
+    switch (t) {
+        case SyntaxToken::Keyword: return "Keyword";
+        case SyntaxToken::Number: return "Number";
+        case SyntaxToken::StringLiteral: return "String";
+        case SyntaxToken::Comment: return "Comment";
+    }
+    return "?";
+}
+static std::string dbg(const HighlightSpan& s) {
+    return "(" + std::to_string(s.location) + ", " + std::to_string(s.length) + ", " +
+           dbg(s.type) + ")";
+}
+static std::string dbg(const vector<HighlightSpan>& v) {
     std::string s = "[";
     for (size_t i = 0; i < v.size(); ++i) {
         if (i) s += ", ";
@@ -318,6 +341,41 @@ TEST(hba_QuotedValues) {
     CHECK_EQ(PostgresHba::quotedValues(LR"(a "one" b "two" c)"),
              (vector<wstring>{L"one", L"two"}));
     CHECK_EQ(PostgresHba::quotedValues(L"no quotes here"), (vector<wstring>{}));
+}
+
+// ===== SqlSyntaxHighlighter ==================================================
+
+static vector<HighlightSpan> spans(const wstring& s) {
+    return SqlSyntaxHighlighter::computeSpans(s);
+}
+
+TEST(highlighter_keyword_number_comment) {
+    CHECK_EQ(spans(L"SELECT 1 -- x"),
+             (vector<HighlightSpan>{{0, 6, SyntaxToken::Keyword},
+                                    {7, 1, SyntaxToken::Number},
+                                    {9, 4, SyntaxToken::Comment}}));
+}
+
+TEST(highlighter_string_and_comment_win) {
+    CHECK_EQ(spans(L"WHERE x = 'a' -- note"),
+             (vector<HighlightSpan>{{0, 5, SyntaxToken::Keyword},
+                                    {10, 3, SyntaxToken::StringLiteral},
+                                    {14, 7, SyntaxToken::Comment}}));
+}
+
+TEST(highlighter_keyword_inside_comment_not_highlighted) {
+    CHECK_EQ(spans(L"-- SELECT 1"),
+             (vector<HighlightSpan>{{0, 11, SyntaxToken::Comment}}));
+}
+
+TEST(highlighter_decimal_number) {
+    CHECK_EQ(spans(L"x = 3.14"),
+             (vector<HighlightSpan>{{4, 4, SyntaxToken::Number}}));
+}
+
+TEST(highlighter_digits_in_identifier_are_not_a_number) {
+    CHECK_EQ(spans(L"col123 FROM t"),
+             (vector<HighlightSpan>{{7, 4, SyntaxToken::Keyword}}));
 }
 
 // ===== runner ================================================================
