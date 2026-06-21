@@ -102,12 +102,12 @@ struct ColumnsMsg {
     std::vector<std::wstring> lines;
 };
 
-constexpr int kSplitterHeight = 5;
+constexpr int kSplitterHeight = 4;
 constexpr int kMinEditor = 80;
 constexpr int kMinList = 100;
 constexpr int kCmdBarH = 46;
-constexpr int kPaneInset = 3;   // child margin inside its slot (the rounded-card gap)
-constexpr int kFrameInset = 1;  // rounded frame inset inside the slot
+constexpr int kPaneInset = 2;   // child margin inside its slot (the rounded-card gap)
+constexpr int kFrameInset = 0;  // frame flush to the slot edge (tight inter-pane seam)
 constexpr int kPaneRadius = 8;  // rounded-card corner radius
 
 // Multi-window: one heap AppState per window; quit when the last one closes.
