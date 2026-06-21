@@ -1346,6 +1346,8 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (newEdit > maxEdit) newEdit = maxEdit;
                 st->editorHeight = newEdit;
                 layout(st);
+                RedrawWindow(st->hwnd, nullptr, nullptr,
+                             RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_NOERASE);
             }
             return 0;
         case WM_LBUTTONUP:
@@ -1398,6 +1400,8 @@ LRESULT CALLBACK VSplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 if (newW > maxW) newW = maxW;
                 st->sidebarWidth = newW;
                 layout(st);
+                RedrawWindow(st->hwnd, nullptr, nullptr,
+                             RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_NOERASE);
             }
             return 0;
         case WM_LBUTTONUP:
