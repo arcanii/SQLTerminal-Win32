@@ -308,7 +308,15 @@ void layout(AppState* st) {
     const int minEdit = dp(kMinEditor, d);
     const int ch = (std::max)(0, static_cast<int>(rc.bottom) - statusHeight(st) - top);
 
-    if (st->hCmdBar) MoveWindow(st->hCmdBar, 0, 0, cw, top, TRUE);
+    // Batch all pane moves into one atomic pass so a resize repaints the panes
+    // together rather than child-by-child (which causes drag lag).
+    HDWP dwp = BeginDeferWindowPos(6);
+    auto place = [&](HWND h, int x, int y, int w, int hh) {
+        if (h && dwp)
+            dwp = DeferWindowPos(dwp, h, nullptr, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+
+    place(st->hCmdBar, 0, 0, cw, top);
 
     // Left: schema sidebar (tree) + vertical splitter.
     const int vsW = splitH;
@@ -319,8 +327,8 @@ void layout(AppState* st) {
     if (sw < 0) sw = 0;
     const int rx = sw + vsW;
     const int rw = (std::max)(0, cw - rx);
-    MoveWindow(st->hTree, 0, top, sw, ch, TRUE);
-    MoveWindow(st->hVSplitter, sw, top, vsW, ch, TRUE);
+    place(st->hTree, 0, top, sw, ch);
+    place(st->hVSplitter, sw, top, vsW, ch);
 
     // Right: results / horizontal splitter / editor.
     int editH = st->editorHeight;
@@ -331,9 +339,10 @@ void layout(AppState* st) {
     int listH = ch - editH - splitH;
     if (listH < 0) listH = 0;
 
-    MoveWindow(st->hList, rx, top, rw, listH, TRUE);
-    MoveWindow(st->hSplitter, rx, top + listH, rw, splitH, TRUE);
-    MoveWindow(st->hEdit, rx, top + listH + splitH, rw, editH, TRUE);
+    place(st->hList, rx, top, rw, listH);
+    place(st->hSplitter, rx, top + listH, rw, splitH);
+    place(st->hEdit, rx, top + listH + splitH, rw, editH);
+    if (dwp) EndDeferWindowPos(dwp);
 
     if (st->hStatus) {
         int parts[2] = {cw - dp(220, d), -1};
