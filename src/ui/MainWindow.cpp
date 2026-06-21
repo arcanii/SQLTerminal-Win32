@@ -618,6 +618,7 @@ void doConnectionDetails(AppState* st) {
 }
 
 LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+LRESULT CALLBACK StatusSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 void createChildren(AppState* st, HINSTANCE hInst) {
     const Theme& th = currentTheme();
@@ -677,6 +678,7 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                   st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                   hInst, nullptr);
+    SetWindowSubclass(st->hStatus, StatusSubclassProc, 2, 0);
 
     st->hCmdBar = CreateWindowExW(0, kCmdBarClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, st->hwnd,
                                   nullptr, hInst, nullptr);
@@ -1042,6 +1044,29 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// Recolor the comctl status bar's light top etch line to the theme border, so the
+// status bar matches the rest of the dark chrome.
+LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                    DWORD_PTR) {
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, StatusSubclassProc, 2);
+    if (msg == WM_PAINT) {
+        const LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+        if (HDC dc = GetDC(hwnd)) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HPEN pen = CreatePen(PS_SOLID, 1, currentTheme().border);
+            HGDIOBJ op = SelectObject(dc, pen);
+            MoveToEx(dc, rc.left, 0, nullptr);
+            LineTo(dc, rc.right, 0);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            ReleaseDC(hwnd, dc);
+        }
+        return r;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 // Subclass the results ListView so we can dark-custom-draw its header (the
