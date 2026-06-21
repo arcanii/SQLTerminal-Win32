@@ -106,6 +106,9 @@ constexpr int kSplitterHeight = 6;
 constexpr int kMinEditor = 80;
 constexpr int kMinList = 100;
 constexpr int kCmdBarH = 46;
+constexpr int kPaneInset = 5;   // child margin inside its slot (the rounded-card gap)
+constexpr int kFrameInset = 2;  // rounded frame inset inside the slot
+constexpr int kPaneRadius = 8;  // rounded-card corner radius
 
 // Multi-window: one heap AppState per window; quit when the last one closes.
 int g_windowCount = 0;
@@ -128,6 +131,7 @@ struct AppState {
     std::wstring statusMsg;   // custom-painted status bar text (left part)
     int editorHeight = 150;
     int sidebarWidth = 220;
+    RECT treeSlot{}, listSlot{}, editSlot{};  // pane rects for the rounded frames (parent-painted)
     std::wstring contextTable;  // table the schema context menu acted on
     bool busy = false;
     bool cancelRequested = false;
@@ -240,7 +244,14 @@ void layout(AppState* st) {
     if (sw < 0) sw = 0;
     const int rx = sw + vsW;
     const int rw = (std::max)(0, cw - rx);
-    place(st->hTree, 0, top, sw, ch);
+    const int paneM = dp(kPaneInset, d);
+    auto placeInset = [&](HWND h, const RECT& s) {
+        place(h, static_cast<int>(s.left) + paneM, static_cast<int>(s.top) + paneM,
+              (std::max)(0, static_cast<int>(s.right - s.left) - 2 * paneM),
+              (std::max)(0, static_cast<int>(s.bottom - s.top) - 2 * paneM));
+    };
+    st->treeSlot = {0, top, sw, top + ch};
+    placeInset(st->hTree, st->treeSlot);
     place(st->hVSplitter, sw, top, vsW, ch);
 
     // Right: results / horizontal splitter / editor.
@@ -252,9 +263,11 @@ void layout(AppState* st) {
     int listH = ch - editH - splitH;
     if (listH < 0) listH = 0;
 
-    place(st->hList, rx, top, rw, listH);
+    st->listSlot = {rx, top, rx + rw, top + listH};
+    st->editSlot = {rx, top + listH + splitH, rx + rw, top + listH + splitH + editH};
+    placeInset(st->hList, st->listSlot);
     place(st->hSplitter, rx, top + listH, rw, splitH);
-    place(st->hEdit, rx, top + listH + splitH, rw, editH);
+    placeInset(st->hEdit, st->editSlot);
     if (dwp) EndDeferWindowPos(dwp);
 
     if (st->hStatus) {
@@ -262,6 +275,7 @@ void layout(AppState* st) {
         SendMessageW(st->hStatus, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
         updateFlags(st);
     }
+    InvalidateRect(st->hwnd, nullptr, FALSE);  // repaint the rounded pane frames in the margins
 }
 
 // The results grid is the self-contained SqlGridControl (src/ui/SqlGridControl.*):
@@ -1564,11 +1578,44 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE:
             if (st) layout(st);
             return 0;
-        case WM_ERASEBKGND: {
+        case WM_ERASEBKGND:
+            return 1;  // background + rounded pane frames are painted in WM_PAINT
+        case WM_PAINT: {
+            // Paint the window backdrop and a rounded hairline frame around each
+            // pane (in the inset margins; WS_CLIPCHILDREN keeps it off the children).
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            FillRect(reinterpret_cast<HDC>(wParam), &rc, themeBrush(currentTheme().windowBg));
-            return 1;
+            HDC dc = CreateCompatibleDC(hdc);
+            HBITMAP bmp =
+                CreateCompatibleBitmap(hdc, (std::max)(1L, rc.right), (std::max)(1L, rc.bottom));
+            HGDIOBJ obmp = SelectObject(dc, bmp);
+            const Theme& th = currentTheme();
+            FillRect(dc, &rc, themeBrush(th.windowBg));
+            if (st) {
+                HPEN pen = CreatePen(PS_SOLID, 1, th.border);
+                HGDIOBJ opn = SelectObject(dc, pen);
+                HGDIOBJ obr = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                const int rad = dp(kPaneRadius, st->dpi);
+                const int fi = dp(kFrameInset, st->dpi);
+                const RECT* slots[] = {&st->treeSlot, &st->listSlot, &st->editSlot};
+                for (const RECT* s : slots) {
+                    RECT f = *s;
+                    InflateRect(&f, -fi, -fi);
+                    if (f.right > f.left && f.bottom > f.top)
+                        RoundRect(dc, f.left, f.top, f.right, f.bottom, rad, rad);
+                }
+                SelectObject(dc, opn);
+                SelectObject(dc, obr);
+                DeleteObject(pen);
+            }
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, obmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            EndPaint(hwnd, &ps);
+            return 0;
         }
         case WM_DPICHANGED:
             if (st) {
