@@ -342,19 +342,6 @@ void layout(AppState* st) {
     MoveWindow(st->hSplitter, rx, top + listH, rw, splitH, TRUE);
     MoveWindow(st->hEdit, rx, top + listH + splitH, rw, editH, TRUE);
 
-    // Rounded "card" corners on the content panels (corners reveal the window bg).
-    const int pr = dp(6, d);
-    auto roundPanel = [&](HWND h, int w, int hh) {
-        SetWindowRgn(h,
-                     (w > 2 * pr && hh > 2 * pr)
-                         ? CreateRoundRectRgn(0, 0, w + 1, hh + 1, pr * 2, pr * 2)
-                         : nullptr,
-                     TRUE);
-    };
-    roundPanel(st->hTree, sw, ch);
-    roundPanel(st->hList, rw, listH);
-    roundPanel(st->hEdit, rw, editH);
-
     if (st->hStatus) {
         int parts[2] = {cw - dp(220, d), -1};
         SendMessageW(st->hStatus, SB_SETPARTS, 2, reinterpret_cast<LPARAM>(parts));
@@ -660,6 +647,7 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     TreeView_SetBkColor(st->hTree, th.panelBg);
     TreeView_SetTextColor(st->hTree, th.textPrimary);
     if (th.dark) SetWindowTheme(st->hTree, L"DarkMode_Explorer", nullptr);
+    SendMessageW(st->hTree, TVM_SETEXTENDEDSTYLE, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
     SendMessageW(st->hTree, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
 
     st->hVSplitter = CreateWindowExW(0, kVSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
@@ -971,6 +959,26 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        case WM_SETCURSOR: {
+            // Show the resize cursor over the thin top edge (above the buttons).
+            if (st && LOWORD(lParam) == HTCLIENT && !IsZoomed(st->hwnd)) {
+                POINT cp;
+                GetCursorPos(&cp);
+                ScreenToClient(hwnd, &cp);
+                RECT btn[kCmdCount];
+                RECT chip;
+                RECT cap[3];
+                cmdRects(hwnd, btn, &chip, cap);
+                bool onCap = false;
+                for (int i = 0; i < 3; ++i)
+                    if (PtInRect(&cap[i], cp)) onCap = true;
+                if (cp.y < dp(5, st->dpi) && !onCap) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+                    return TRUE;
+                }
+            }
+            break;
+        }
         case WM_LBUTTONDOWN: {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             RECT btn[kCmdCount];
@@ -998,6 +1006,12 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (PtInRect(&cap[2], pt)) {
                 SendMessageW(st->hwnd, WM_CLOSE, 0, 0);
+                return 0;
+            }
+            // Thin top edge (above the buttons): forward a top-edge resize.
+            if (pt.y < dp(5, st->dpi) && !IsZoomed(st->hwnd)) {
+                ReleaseCapture();
+                SendMessageW(st->hwnd, WM_NCLBUTTONDOWN, HTTOP, 0);
                 return 0;
             }
             // Empty area: only begin a window drag once the pointer actually moves,
@@ -1365,9 +1379,9 @@ void onTreeContextMenu(AppState* st) {
 HWND createMainWindow(int nCmdShow) {
     auto* state = new AppState();
     const int sysDpi = static_cast<int>(GetDpiForSystem());
-    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                CW_USEDEFAULT, MulDiv(1100, sysDpi, 96), MulDiv(750, sysDpi, 96),
-                                nullptr, nullptr, g_appInstance, state);
+    HWND hwnd = CreateWindowExW(0, kClassName, L"SQLTerminal", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, MulDiv(1100, sysDpi, 96),
+                                MulDiv(750, sysDpi, 96), nullptr, nullptr, g_appInstance, state);
     if (!hwnd) {
         delete state;
         return nullptr;
