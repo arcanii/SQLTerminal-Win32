@@ -32,6 +32,13 @@ add_library(SqlCore STATIC
 target_include_directories(SqlCore PUBLIC src)
 
 # ---------------------------------------------------------------------------
+# EditorCore — pure, platform-free text model behind the Direct2D SQL editor.
+# (Buffer, caret/selection, edits, navigation, undo. No Win32 / Direct2D deps.)
+# ---------------------------------------------------------------------------
+add_library(EditorCore STATIC src/editor/EditorModel.cpp)
+target_include_directories(EditorCore PUBLIC src)  # for core/SqlText.h (header-only)
+
+# ---------------------------------------------------------------------------
 # sqlite3 — vendored public-domain amalgamation, compiled into the app.
 # ---------------------------------------------------------------------------
 add_library(sqlite3 STATIC third_party/sqlite/sqlite3.c)
@@ -118,6 +125,11 @@ add_executable(SqlCoreTests tests/sqlcore_tests.cpp)
 target_link_libraries(SqlCoreTests PRIVATE SqlCore)
 target_include_directories(SqlCoreTests PRIVATE tests)
 add_test(NAME SqlCoreTests COMMAND SqlCoreTests)
+
+add_executable(EditorCoreTests tests/editor_core_tests.cpp)
+target_link_libraries(EditorCoreTests PRIVATE EditorCore)
+target_include_directories(EditorCoreTests PRIVATE tests)
+add_test(NAME EditorCoreTests COMMAND EditorCoreTests)
 
 add_executable(SqlDbTests tests/sqlite_provider_tests.cpp)
 target_link_libraries(SqlDbTests PRIVATE SqlDb)
