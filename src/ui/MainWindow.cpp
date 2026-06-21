@@ -102,12 +102,12 @@ struct ColumnsMsg {
     std::vector<std::wstring> lines;
 };
 
-constexpr int kSplitterHeight = 6;
+constexpr int kSplitterHeight = 5;
 constexpr int kMinEditor = 80;
 constexpr int kMinList = 100;
 constexpr int kCmdBarH = 46;
-constexpr int kPaneInset = 5;   // child margin inside its slot (the rounded-card gap)
-constexpr int kFrameInset = 2;  // rounded frame inset inside the slot
+constexpr int kPaneInset = 3;   // child margin inside its slot (the rounded-card gap)
+constexpr int kFrameInset = 1;  // rounded frame inset inside the slot
 constexpr int kPaneRadius = 8;  // rounded-card corner radius
 
 // Multi-window: one heap AppState per window; quit when the last one closes.
@@ -1093,17 +1093,10 @@ LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             HDC dc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            const Theme& th = currentTheme();
-            HBRUSH bg = CreateSolidBrush(th.windowBg);
-            FillRect(dc, &rc, bg);
-            DeleteObject(bg);
-            HPEN pen = CreatePen(PS_SOLID, 1, th.border);
-            HGDIOBJ old = SelectObject(dc, pen);
-            const int y = (rc.bottom - rc.top) / 2;
-            MoveToEx(dc, rc.left, y, nullptr);
-            LineTo(dc, rc.right, y);
-            SelectObject(dc, old);
-            DeleteObject(pen);
+            // The rounded card edges (parent-painted) are the divider now; the
+            // splitter just fills the gutter so it reads as one clean seam. No
+            // center line — it would triple up with the two adjacent card edges.
+            FillRect(dc, &rc, themeBrush(currentTheme().windowBg));
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1150,17 +1143,10 @@ LRESULT CALLBACK VSplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             HDC dc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            const Theme& th = currentTheme();
-            HBRUSH bg = CreateSolidBrush(th.windowBg);
-            FillRect(dc, &rc, bg);
-            DeleteObject(bg);
-            HPEN pen = CreatePen(PS_SOLID, 1, th.border);
-            HGDIOBJ old = SelectObject(dc, pen);
-            const int x = (rc.right - rc.left) / 2;
-            MoveToEx(dc, x, rc.top, nullptr);
-            LineTo(dc, x, rc.bottom);
-            SelectObject(dc, old);
-            DeleteObject(pen);
+            // The rounded card edges (parent-painted) are the divider now; the
+            // splitter just fills the gutter so it reads as one clean seam. No
+            // center line — it would triple up with the two adjacent card edges.
+            FillRect(dc, &rc, themeBrush(currentTheme().windowBg));
             EndPaint(hwnd, &ps);
             return 0;
         }
