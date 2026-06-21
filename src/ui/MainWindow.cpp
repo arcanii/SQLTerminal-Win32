@@ -119,15 +119,13 @@ struct AppState {
     HWND hStatus = nullptr;
     HWND hTree = nullptr;
     HWND hVSplitter = nullptr;
-    HFONT hMono = nullptr;
     HFONT hUi = nullptr;
     HFONT hGlyph = nullptr;     // Segoe MDL2 Assets, for command-bar icons
     HWND hCmdBar = nullptr;     // custom top command bar (replaces the menu)
     int cmdHover = -1;          // hovered command-bar button index, or -1
     int capHover = -1;          // hovered caption button (0=min 1=max 2=close), or -1
     int dpi = 96;               // window DPI (per-monitor-v2)
-    std::wstring statusMsg;   // owner-drawn status bar, left part
-    std::wstring flagsText;   // owner-drawn status bar, right part (SSL/read-only/tx)
+    std::wstring statusMsg;   // custom-painted status bar text (left part)
     int editorHeight = 150;
     int sidebarWidth = 220;
     std::wstring contextTable;  // table the schema context menu acted on
@@ -154,17 +152,14 @@ struct AppState {
 // Scale a 96-dpi design value to the window's current DPI.
 int dp(int v, int dpi) { return MulDiv(v, dpi, 96); }
 
-// Create (or recreate, on DPI change) the UI/monospace/glyph fonts at st->dpi.
+// Create (or recreate, on DPI change) the UI + glyph fonts at st->dpi. (Content
+// renders via DirectWrite now; the editor and grid own their own Consolas formats.)
 void createFonts(AppState* st) {
     if (st->hUi) DeleteObject(st->hUi);
-    if (st->hMono) DeleteObject(st->hMono);
     if (st->hGlyph) DeleteObject(st->hGlyph);
     st->hUi = CreateFontW(-dp(14, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                           VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
-    st->hMono = CreateFontW(-dp(14, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            FIXED_PITCH | FF_MODERN, L"Consolas");
     st->hGlyph = CreateFontW(-dp(17, st->dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
@@ -1646,62 +1641,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
-        case WM_DRAWITEM: {
-            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-            if (st && dis->hwndItem == st->hStatus) {
-                const Theme& th = currentTheme();
-                HBRUSH bg = CreateSolidBrush(th.panelElevBg);
-                FillRect(dis->hDC, &dis->rcItem, bg);
-                DeleteObject(bg);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                HGDIOBJ oldFont = SelectObject(dis->hDC, st->hUi);
-                RECT tr = dis->rcItem;
-                if (dis->itemID == 0) {
-                    tr.left += dp(12, st->dpi);
-                    SetTextColor(dis->hDC, th.textPrimary);
-                    DrawTextW(dis->hDC, st->statusMsg.c_str(), -1, &tr,
-                              DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
-                } else {
-                    // Right part: active status flags as subtle pills, right-to-left.
-                    struct Flag {
-                        bool on;
-                        const wchar_t* text;
-                        COLORREF fg;
-                    };
-                    const Flag flags[] = {
-                        {st->sslActive, L"SSL", RGB(120, 190, 255)},
-                        {st->readOnly, L"read-only", RGB(240, 181, 97)},
-                        {st->inTransaction, L"in transaction", th.accent},
-                    };
-                    SelectObject(dis->hDC, st->hUi);
-                    int right = tr.right - dp(12, st->dpi);
-                    for (int i = static_cast<int>(sizeof(flags) / sizeof(flags[0])) - 1; i >= 0; --i) {
-                        if (!flags[i].on) continue;
-                        SIZE sz{};
-                        GetTextExtentPoint32W(dis->hDC, flags[i].text, lstrlenW(flags[i].text), &sz);
-                        const int w = sz.cx + dp(18, st->dpi);
-                        const int h = dp(18, st->dpi);
-                        const int midY = (tr.top + tr.bottom) / 2;
-                        RECT pr{right - w, midY - h / 2, right, midY + h / 2};
-                        HBRUSH pb = CreateSolidBrush(th.panelBg);
-                        HGDIOBJ ob = SelectObject(dis->hDC, pb);
-                        HGDIOBJ op = SelectObject(dis->hDC, GetStockObject(NULL_PEN));
-                        RoundRect(dis->hDC, pr.left, pr.top, pr.right, pr.bottom, dp(9, st->dpi),
-                                  dp(9, st->dpi));
-                        SelectObject(dis->hDC, ob);
-                        SelectObject(dis->hDC, op);
-                        DeleteObject(pb);
-                        SetTextColor(dis->hDC, flags[i].fg);
-                        DrawTextW(dis->hDC, flags[i].text, -1, &pr,
-                                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-                        right -= w + dp(6, st->dpi);
-                    }
-                }
-                SelectObject(dis->hDC, oldFont);
-                return TRUE;
-            }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        }
         case WM_NOTIFY: {
             auto* nh = reinterpret_cast<NMHDR*>(lParam);
             if (st && nh->idFrom == IDC_TREE) {
@@ -1776,7 +1715,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (st && st->hEdit) SetFocus(st->hEdit);
             return 0;
         case WM_DESTROY:
-            if (st && st->hMono) DeleteObject(st->hMono);
             if (st && st->hUi) DeleteObject(st->hUi);
             if (st && st->hGlyph) DeleteObject(st->hGlyph);
             return 0;
@@ -1794,7 +1732,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int runApp(HINSTANCE hInstance, int nCmdShow) {
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_WIN95_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES |
+    icc.dwICC = ICC_WIN95_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES |
                 ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
     enableDarkMenus();
