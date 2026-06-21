@@ -194,6 +194,7 @@ configure_file("${CMAKE_SOURCE_DIR}/src/version.h.in"
 add_executable(SQLTerminal WIN32
   src/WinMain.cpp
   src/ui/MainWindow.cpp
+  src/ui/SqlEditorControl.cpp
   src/ui/ConnectionDialog.cpp
   src/ui/CellDetailDialog.cpp
   src/ui/HistoryDialog.cpp
@@ -205,7 +206,8 @@ add_executable(SQLTerminal WIN32
 set_source_files_properties(packaging/SQLTerminal.rc PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.ico;${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.manifest")
 target_link_libraries(SQLTerminal PRIVATE
-  SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi uxtheme)
+  SqlDb SqlCore SqlStore SqlApp EditorCore WinSparkle
+  comctl32 comdlg32 dwmapi uxtheme d2d1 dwrite imm32)
 target_include_directories(SQLTerminal PRIVATE "${CMAKE_BINARY_DIR}/generated")
 # Our manifest is embedded via the .rc; stop the linker generating a competing one.
 if(MSVC)

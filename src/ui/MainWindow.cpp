@@ -13,9 +13,6 @@
 #include <uxtheme.h>
 #include <windowsx.h>
 
-#define _RICHEDIT_VER 0x0500
-#include <richedit.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -42,6 +39,7 @@
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
 #include "ui/HistoryDialog.h"
+#include "ui/SqlEditorControl.h"
 #include "ui/Theme.h"
 
 namespace sqlterm {
@@ -136,7 +134,6 @@ struct AppState {
     int editorHeight = 150;
     int sidebarWidth = 220;
     std::wstring contextTable;  // table the schema context menu acted on
-    bool suppressHighlight = false;
     bool busy = false;
     bool cancelRequested = false;
     DatabaseSession session;
@@ -200,77 +197,9 @@ void applyDarkTitleBar(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
 }
 
-COLORREF colorFor(sqlcore::SyntaxToken t) {
-    const Theme& th = currentTheme();
-    switch (t) {
-        case sqlcore::SyntaxToken::Keyword: return th.synKeyword;
-        case sqlcore::SyntaxToken::Number: return th.synNumber;
-        case sqlcore::SyntaxToken::StringLiteral: return th.synString;
-        case sqlcore::SyntaxToken::Comment: return th.synComment;
-    }
-    return th.textPrimary;
-}
-
-std::wstring editorText(HWND edit) {
-    GETTEXTLENGTHEX gtl{};
-    gtl.flags = GTL_NUMCHARS;
-    gtl.codepage = 1200;
-    const LONG n = static_cast<LONG>(SendMessageW(edit, EM_GETTEXTLENGTHEX,
-                                                  reinterpret_cast<WPARAM>(&gtl), 0));
-    if (n <= 0) return std::wstring();
-    std::wstring buf(static_cast<size_t>(n), L'\0');
-    GETTEXTEX gt{};
-    gt.cb = static_cast<DWORD>((n + 1) * sizeof(wchar_t));
-    gt.flags = GT_DEFAULT;
-    gt.codepage = 1200;
-    const LONG got = static_cast<LONG>(SendMessageW(
-        edit, EM_GETTEXTEX, reinterpret_cast<WPARAM>(&gt), reinterpret_cast<LPARAM>(buf.data())));
-    buf.resize(static_cast<size_t>(got));
-    for (auto& c : buf)
-        if (c == L'\r') c = L'\n';
-    return buf;
-}
-
-LONG caretOffset(HWND edit) {
-    CHARRANGE cr{};
-    SendMessageW(edit, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&cr));
-    return cr.cpMin;
-}
-
-void applyHighlight(AppState* st) {
-    if (st->suppressHighlight) return;
-    st->suppressHighlight = true;
-    HWND e = st->hEdit;
-
-    CHARRANGE saved{};
-    SendMessageW(e, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&saved));
-    SendMessageW(e, WM_SETREDRAW, FALSE, 0);
-
-    const std::wstring text = editorText(e);
-    const auto spans = sqlcore::SqlSyntaxHighlighter::computeSpans(text);
-
-    CHARFORMAT2W base{};
-    base.cbSize = sizeof(base);
-    base.dwMask = CFM_COLOR;
-    base.crTextColor = currentTheme().textPrimary;
-    SendMessageW(e, EM_SETSEL, 0, -1);
-    SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
-
-    for (const auto& s : spans) {
-        CHARRANGE cr{static_cast<LONG>(s.location), static_cast<LONG>(s.location + s.length)};
-        SendMessageW(e, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&cr));
-        CHARFORMAT2W cf{};
-        cf.cbSize = sizeof(cf);
-        cf.dwMask = CFM_COLOR;
-        cf.crTextColor = colorFor(s.type);
-        SendMessageW(e, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
-    }
-
-    SendMessageW(e, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&saved));
-    SendMessageW(e, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(e, nullptr, TRUE);
-    st->suppressHighlight = false;
-}
+// editorText() and caretOffset() now live in SqlEditorControl.cpp — the Direct2D
+// editor reads its EditorModel directly. Syntax highlighting is internal to that
+// control, so the RichEdit-era applyHighlight()/colorFor() helpers are gone.
 
 void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body);
 
@@ -764,22 +693,10 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     SetWindowLongPtrW(st->hVSplitter, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
 
     st->hEdit = CreateWindowExW(
-        0, MSFTEDIT_CLASS, L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN |
-            ES_NOHIDESEL,
-        0, 0, 0, 0, st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)), hInst, nullptr);
-    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(th.windowBg));
+        0, L"SqlD2DEditor", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL, 0, 0, 0, 0, st->hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT)), hInst, nullptr);
     if (th.dark) SetWindowTheme(st->hEdit, L"DarkMode_Explorer", nullptr);
-    CHARFORMAT2W cf{};
-    cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_FACE | CFM_SIZE | CFM_COLOR;
-    cf.yHeight = 220;
-    cf.crTextColor = th.textPrimary;
-    lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
-    SendMessageW(st->hEdit, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
     SetWindowTextW(st->hEdit, L"SELECT * FROM users;");
-    SendMessageW(st->hEdit, EM_SETEVENTMASK, 0, ENM_CHANGE);
-    applyHighlight(st);
 
     st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                   st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
@@ -1743,9 +1660,7 @@ void reapplyTheme(AppState* st) {
     SetWindowTheme(st->hTree, explorerTheme, nullptr);
     InvalidateRect(st->hTree, nullptr, TRUE);
 
-    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(th.windowBg));
-    SetWindowTheme(st->hEdit, explorerTheme, nullptr);
-    applyHighlight(st);  // re-colors the syntax + base text
+    editorApplyTheme(st->hEdit);  // rebuild D2D brushes + scrollbar theme, repaint
 
     InvalidateRect(st->hCmdBar, nullptr, TRUE);
     InvalidateRect(st->hStatus, nullptr, TRUE);
@@ -1819,6 +1734,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 createFonts(st);
                 SendMessageW(st->hTree, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
                 SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
+                editorUpdateDpi(st->hEdit, static_cast<UINT>(st->dpi));
                 auto* sug = reinterpret_cast<RECT*>(lParam);
                 SetWindowPos(hwnd, nullptr, sug->left, sug->top, sug->right - sug->left,
                              sug->bottom - sug->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1835,10 +1751,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
-            const int code = HIWORD(wParam);
-            if (reinterpret_cast<HWND>(lParam) == st->hEdit && code == EN_CHANGE)
-                applyHighlight(st);
-            else if (id == ID_MENU) showMainMenu(st);
+            if (id == ID_MENU) showMainMenu(st);
             else if (id == ID_OPEN) doOpen(st);
             else if (id == ID_RUN) doRunWhole(st);
             else if (id == ID_RUN_STMT) doRunStatement(st);
@@ -2111,8 +2024,8 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
     InitCommonControlsEx(&icc);
     enableDarkMenus();
 
-    if (!LoadLibraryW(L"Msftedit.dll")) {
-        MessageBoxW(nullptr, L"Failed to load Msftedit.dll (RichEdit).", L"SQLTerminal",
+    if (!registerSqlEditorClass(hInstance)) {
+        MessageBoxW(nullptr, L"Failed to register the SQL editor window class.", L"SQLTerminal",
                     MB_ICONERROR | MB_OK);
         return 1;
     }
