@@ -547,6 +547,14 @@ LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
+        case WM_ERASEBKGND: {
+            // Paint the surface from the *current* theme, not the class brush
+            // captured at first registration (which would stay dark in light mode).
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, themeBrush(currentTheme().panelBg));
+            return 1;
+        }
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORBTN:
@@ -570,7 +578,7 @@ void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body) 
         wc.hInstance = g_appInstance;
         wc.lpszClassName = L"SQLTerminalInfo";
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = themeBrush(currentTheme().panelBg);
+        wc.hbrBackground = nullptr;  // painted per current theme in WM_ERASEBKGND
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -638,16 +646,24 @@ void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body) 
 }
 
 void doConnectionDetails(AppState* st) {
+    // Left-justify each "Label:" to a fixed width so values line up in a column
+    // (the info dialog renders in a monospace font).
+    auto row = [](const std::wstring& label, const std::wstring& value) {
+        std::wstring s = label;
+        while (s.size() < 12) s.push_back(L' ');
+        return s + value;
+    };
     std::wstring m;
     if (!st->session.isConnected()) {
         m = L"Not connected.";
     } else if (st->currentConnection.engine == DatabaseEngine::Postgres) {
         const auto& c = st->currentConnection;
-        m = L"Engine:  PostgreSQL\nHost:  " + c.host + L"\nPort:  " + c.port + L"\nDatabase:  " +
-            c.databaseName + L"\nUser:  " + c.username + L"\nEncryption:  " +
-            (st->sslActive ? L"SSL/TLS" : L"none");
+        m = row(L"Engine:", L"PostgreSQL") + L"\n" + row(L"Host:", c.host) + L"\n" +
+            row(L"Port:", c.port) + L"\n" + row(L"Database:", c.databaseName) + L"\n" +
+            row(L"User:", c.username) + L"\n" +
+            row(L"Encryption:", st->sslActive ? L"SSL/TLS" : L"none");
     } else {
-        m = L"Engine:  SQLite\nFile:  " + st->currentConnection.filePath;
+        m = row(L"Engine:", L"SQLite") + L"\n" + row(L"File:", st->currentConnection.filePath);
     }
     showInfoDialog(st->hwnd, L"Connection Details", m);
 }
