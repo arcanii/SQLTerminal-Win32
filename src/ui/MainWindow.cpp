@@ -272,22 +272,15 @@ void applyHighlight(AppState* st) {
     st->suppressHighlight = false;
 }
 
+void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body);
+
 void setStatus(AppState* st, const std::wstring& text) {
     st->statusMsg = text;
-    SendMessageW(st->hStatus, SB_SETTEXTW, 0 | SBT_OWNERDRAW, 0);
+    if (st->hStatus) InvalidateRect(st->hStatus, nullptr, FALSE);
 }
 
 void updateFlags(AppState* st) {
-    std::wstring f;
-    auto add = [&](const wchar_t* s) {
-        if (!f.empty()) f += L"   ·   ";
-        f += s;
-    };
-    if (st->sslActive) add(L"SSL");
-    if (st->readOnly) add(L"read-only");
-    if (st->inTransaction) add(L"in transaction");
-    st->flagsText = f;
-    SendMessageW(st->hStatus, SB_SETTEXTW, 1 | SBT_OWNERDRAW, 0);
+    if (st->hStatus) InvalidateRect(st->hStatus, nullptr, FALSE);  // flags read from st in paint
 }
 
 void setTitle(AppState* st) {
@@ -507,7 +500,7 @@ void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool re
                 guardAndRun(st, dot->statements);
                 break;
             case DotKind::Message:
-                MessageBoxW(st->hwnd, dot->text.c_str(), L"SQLTerminal", MB_OK | MB_ICONINFORMATION);
+                showInfoDialog(st->hwnd, L"SQLTerminal", dot->text);
                 break;
             case DotKind::Clear:
                 clearGrid(st);
@@ -602,6 +595,101 @@ void doHistory(AppState* st) {
         SetWindowTextW(st->hEdit, sql->c_str());
 }
 
+// ---- generic dark info dialog (Help, Connection Details, dot-command output) -
+struct InfoState {
+    UINT dpi = 96;
+    bool done = false;
+};
+
+LRESULT CALLBACK InfoProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = reinterpret_cast<InfoState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_NCCREATE: {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORBTN:
+            return dialogCtlColor(msg, wParam);
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) st->done = true;
+            return 0;
+        case WM_CLOSE:
+            st->done = true;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = InfoProc;
+        wc.hInstance = g_appInstance;
+        wc.lpszClassName = L"SQLTerminalInfo";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = themeBrush(currentTheme().panelBg);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    InfoState st;
+    const int W = 470, H = 320;
+    const UINT odpi = GetDpiForWindow(owner);
+    RECT orc{};
+    GetWindowRect(owner, &orc);
+    const int fullW = dpiScale(W + 16, odpi), fullH = dpiScale(H + 39, odpi);
+    const int x = orc.left + ((orc.right - orc.left) - fullW) / 2;
+    const int y = orc.top + ((orc.bottom - orc.top) - fullH) / 2;
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"SQLTerminalInfo", title,
+                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, fullW, fullH, owner, nullptr,
+                                g_appInstance, &st);
+    if (!hwnd) return;
+    st.dpi = GetDpiForWindow(hwnd);
+    HFONT mono = CreateFontW(-dpiScale(13, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+    HFONT ui = CreateFontW(-dpiScale(14, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+    HWND edit = CreateWindowExW(0, L"EDIT", body.c_str(),
+                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY |
+                                    ES_AUTOVSCROLL,
+                                dpiScale(14, st.dpi), dpiScale(12, st.dpi), dpiScale(W - 28, st.dpi),
+                                dpiScale(H - 60, st.dpi), hwnd,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(100)), g_appInstance,
+                                nullptr);
+    SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(mono), TRUE);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
+                              WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                              dpiScale(W - 100, st.dpi), dpiScale(H - 40, st.dpi), dpiScale(88, st.dpi),
+                              dpiScale(28, st.dpi), hwnd,
+                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_appInstance,
+                              nullptr);
+    SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(ui), TRUE);
+    applyDialogDarkMode(hwnd);
+    EnableWindow(owner, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    DestroyWindow(hwnd);
+    DeleteObject(mono);
+    DeleteObject(ui);
+}
+
 void doConnectionDetails(AppState* st) {
     std::wstring m;
     if (!st->session.isConnected()) {
@@ -614,7 +702,7 @@ void doConnectionDetails(AppState* st) {
     } else {
         m = L"Engine:  SQLite\nFile:  " + st->currentConnection.filePath;
     }
-    MessageBoxW(st->hwnd, m.c_str(), L"Connection Details", MB_OK | MB_ICONINFORMATION);
+    showInfoDialog(st->hwnd, L"Connection Details", m);
 }
 
 LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
@@ -678,7 +766,7 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     st->hStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                   st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)),
                                   hInst, nullptr);
-    SetWindowSubclass(st->hStatus, StatusSubclassProc, 2, 0);
+    SetWindowSubclass(st->hStatus, StatusSubclassProc, 2, reinterpret_cast<DWORD_PTR>(st));
 
     st->hCmdBar = CreateWindowExW(0, kCmdBarClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, st->hwnd,
                                   nullptr, hInst, nullptr);
@@ -1046,25 +1134,79 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// Recolor the comctl status bar's light top etch line to the theme border, so the
-// status bar matches the rest of the dark chrome.
+// Fully custom-paint the status bar (double-buffered): theme background, a top
+// border line, the left message and the right status pills. Replaces the comctl
+// owner-draw + etch line so there's no white outline and no resize flicker.
 LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
-                                    DWORD_PTR) {
+                                    DWORD_PTR ref) {
+    auto* st = reinterpret_cast<AppState*>(ref);
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, StatusSubclassProc, 2);
-    if (msg == WM_PAINT) {
-        const LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
-        if (HDC dc = GetDC(hwnd)) {
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            HPEN pen = CreatePen(PS_SOLID, 1, currentTheme().border);
-            HGDIOBJ op = SelectObject(dc, pen);
-            MoveToEx(dc, rc.left, 0, nullptr);
-            LineTo(dc, rc.right, 0);
-            SelectObject(dc, op);
-            DeleteObject(pen);
-            ReleaseDC(hwnd, dc);
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT && st) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HDC dc = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HGDIOBJ obmp = SelectObject(dc, bmp);
+        const Theme& th = currentTheme();
+        const int d = st->dpi;
+
+        FillRect(dc, &rc, themeBrush(th.panelElevBg));
+        HPEN pen = CreatePen(PS_SOLID, 1, th.border);
+        HGDIOBJ op = SelectObject(dc, pen);
+        MoveToEx(dc, 0, 0, nullptr);
+        LineTo(dc, rc.right, 0);
+        SelectObject(dc, op);
+        DeleteObject(pen);
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, st->hUi);
+
+        RECT lr = rc;
+        lr.left += dp(12, d);
+        lr.right -= dp(210, d);
+        SetTextColor(dc, th.textPrimary);
+        DrawTextW(dc, st->statusMsg.c_str(), -1, &lr,
+                  DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        struct Flag {
+            bool on;
+            const wchar_t* text;
+            COLORREF fg;
+        };
+        const Flag flags[] = {
+            {st->sslActive, L"SSL", RGB(120, 190, 255)},
+            {st->readOnly, L"read-only", RGB(240, 181, 97)},
+            {st->inTransaction, L"in transaction", th.accent},
+        };
+        int right = rc.right - dp(12, d);
+        for (int i = static_cast<int>(sizeof(flags) / sizeof(flags[0])) - 1; i >= 0; --i) {
+            if (!flags[i].on) continue;
+            SIZE sz{};
+            GetTextExtentPoint32W(dc, flags[i].text, lstrlenW(flags[i].text), &sz);
+            const int w = sz.cx + dp(18, d);
+            const int h = dp(18, d);
+            const int midY = (rc.top + rc.bottom) / 2;
+            RECT pr{right - w, midY - h / 2, right, midY + h / 2};
+            HBRUSH pb = CreateSolidBrush(th.panelBg);
+            HGDIOBJ ob = SelectObject(dc, pb);
+            HGDIOBJ opn = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, pr.left, pr.top, pr.right, pr.bottom, dp(9, d), dp(9, d));
+            SelectObject(dc, ob);
+            SelectObject(dc, opn);
+            DeleteObject(pb);
+            SetTextColor(dc, flags[i].fg);
+            DrawTextW(dc, flags[i].text, -1, &pr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+            right -= w + dp(6, d);
         }
-        return r;
+
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, obmp);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        EndPaint(hwnd, &ps);
+        return 0;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
@@ -1533,19 +1675,18 @@ void doAbout(HWND owner) {
 }
 
 void doHelp(HWND hwnd) {
-    MessageBoxW(hwnd,
-                L"Keyboard shortcuts\n"
-                L"  Ctrl+E          Run the whole editor\n"
-                L"  Ctrl+Enter      Run the statement at the cursor\n"
-                L"  Ctrl+.          Cancel the running query\n"
-                L"  Ctrl+Up/Down    Previous / next command\n"
-                L"  Ctrl+O          Open / connect\n"
-                L"  Ctrl+R          History & snippets\n"
-                L"  Ctrl+N          New window\n"
-                L"  Ctrl+W          Close window\n"
-                L"  F1              This help\n\n"
-                L"Type .help in the editor for SQL dot-commands (.tables, .schema, …).",
-                L"SQLTerminal Help", MB_OK | MB_ICONINFORMATION);
+    showInfoDialog(hwnd, L"SQLTerminal Help",
+                   L"Keyboard shortcuts\n"
+                   L"  Ctrl+E          Run the whole editor\n"
+                   L"  Ctrl+Enter      Run the statement at the cursor\n"
+                   L"  Ctrl+.          Cancel the running query\n"
+                   L"  Ctrl+Up/Down    Previous / next command\n"
+                   L"  Ctrl+O          Open / connect\n"
+                   L"  Ctrl+R          History & snippets\n"
+                   L"  Ctrl+N          New window\n"
+                   L"  Ctrl+W          Close window\n"
+                   L"  F1              This help\n\n"
+                   L"Type .help in the editor for SQL dot-commands (.tables, .schema, …).");
 }
 
 // Force popup/context menus to the given mode (uxtheme ordinals; guarded).
