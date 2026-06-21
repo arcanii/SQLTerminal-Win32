@@ -400,8 +400,9 @@ void paint(GridState* st) {
                 if (cx0 >= viewW) break;
                 const bool sorted = (c == st->sortColumn);
                 ID2D1SolidColorBrush* htf = sorted ? st->brAccent : st->brHeaderText;
-                float textRight = static_cast<float>(cx1 - dpx(st, kHeaderPadX));
-                if (sorted) textRight -= static_cast<float>(dpx(st, kArrowZone));
+                // Always reserve the arrow gap so the title width doesn't shift on sort.
+                const float textRight =
+                    static_cast<float>(cx1 - dpx(st, kHeaderPadX) - dpx(st, kArrowZone));
                 const std::wstring& nm = st->result.columns[static_cast<size_t>(c)];
                 st->rt->DrawText(nm.c_str(), static_cast<UINT32>(nm.size()), st->fmtHeader,
                                  D2D1::RectF(static_cast<float>(cx0 + dpx(st, kHeaderPadX)), 0,
@@ -592,6 +593,18 @@ LRESULT CALLBACK SqlGridProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 const int r = rowAtY(st, my);
                 if (r >= 0) st->selectedRow = r;  // keep selection on a dead-space click
                 InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK: {
+            const int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
+            if (my >= st->headerH) {  // double-click a cell -> open its detail
+                const int r = rowAtY(st, my), c = columnAtX(st, mx);
+                if (r >= 0 && c >= 0) {
+                    st->selectedRow = r;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    showCellDetail(GetParent(hwnd), columnNameAt(st, c), cellAt(st, r, c));
+                }
             }
             return 0;
         }

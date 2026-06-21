@@ -291,7 +291,10 @@ size_t verticalTarget(EditorState* st, int dirLines) {
         return st->model.caret();
     if (st->desiredX < 0) st->desiredX = px;
     float targetY = m.top + m.height * 0.5f + static_cast<float>(dirLines) * st->lineH;
-    if (targetY < 0) targetY = 0;
+    if (targetY < 0) return 0;  // above the first line -> document start
+    DWRITE_TEXT_METRICS tm{};
+    if (SUCCEEDED(st->layout->GetMetrics(&tm)) && targetY > tm.height)
+        return st->model.length();  // below the last line -> document end
     BOOL trailing = FALSE, inside = FALSE;
     DWRITE_HIT_TEST_METRICS hm{};
     st->layout->HitTestPoint(st->desiredX, targetY, &trailing, &inside, &hm);
