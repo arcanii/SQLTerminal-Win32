@@ -40,6 +40,7 @@
 #include "ui/ConnectionDialog.h"
 #include "ui/HistoryDialog.h"
 #include "ui/SqlEditorControl.h"
+#include "ui/SqlGridControl.h"
 #include "ui/Theme.h"
 
 namespace sqlterm {
@@ -66,11 +67,6 @@ enum : int {
     ID_CTX_INSERT = 1013,
     ID_CTX_PREVIEW = 1014,
     ID_CTX_COPY = 1015,
-    ID_GRID_VIEW = 1016,
-    ID_GRID_COPYVAL = 1017,
-    ID_GRID_COPYROW = 1018,
-    ID_GRID_TSV = 1019,
-    ID_GRID_CSV = 1020,
     ID_HISTORY = 1021,
     ID_CONN_DETAILS = 1022,
     ID_NEW = 1023,
@@ -146,14 +142,6 @@ struct AppState {
     bool sslActive = false;
     CommandHistory cmdHistory;
     std::vector<std::wstring> lastRunStatements;
-
-    // Results grid (virtual / owner-data).
-    QueryResult result;
-    int sortColumn = -1;
-    bool sortAscending = true;
-    std::vector<size_t> rowOrder;
-    int ctxRow = -1;
-    int ctxCol = -1;
 
     // Pending connect (applied on WM_APP_CONNECTED success).
     DatabaseConnection pendingConn;
@@ -280,85 +268,16 @@ void layout(AppState* st) {
     }
 }
 
-void clearGrid(AppState* st) {
-    ListView_SetItemCount(st->hList, 0);
-    while (ListView_DeleteColumn(st->hList, 0)) {
-    }
-    st->result = QueryResult{};
-    st->rowOrder.clear();
-    st->sortColumn = -1;
-}
-
-// Cell value in *display* order (resolving the sort permutation), or "" out of range.
-const std::wstring& cellAt(AppState* st, int displayRow, int col) {
-    static const std::wstring empty;
-    if (displayRow < 0 || static_cast<size_t>(displayRow) >= st->rowOrder.size()) return empty;
-    const size_t src = st->rowOrder[static_cast<size_t>(displayRow)];
-    if (src >= st->result.rows.size()) return empty;
-    const auto& row = st->result.rows[src];
-    if (col < 0 || static_cast<size_t>(col) >= row.size()) return empty;
-    return row[static_cast<size_t>(col)];
-}
-
-std::wstring columnNameAt(AppState* st, int col) {
-    if (col >= 0 && static_cast<size_t>(col) < st->result.columns.size())
-        return st->result.columns[static_cast<size_t>(col)];
-    return L"col" + std::to_wstring(col);
-}
-
-std::vector<std::vector<std::wstring>> displayRows(AppState* st) {
-    std::vector<std::vector<std::wstring>> out;
-    out.reserve(st->rowOrder.size());
-    for (size_t d : st->rowOrder)
-        if (d < st->result.rows.size()) out.push_back(st->result.rows[d]);
-    return out;
-}
-
-void updateSortArrow(AppState* st) {
-    HWND header = ListView_GetHeader(st->hList);
-    const int n = Header_GetItemCount(header);
-    for (int i = 0; i < n; ++i) {
-        HDITEMW hi{};
-        hi.mask = HDI_FORMAT;
-        Header_GetItem(header, i, &hi);
-        hi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
-        if (i == st->sortColumn) hi.fmt |= (st->sortAscending ? HDF_SORTUP : HDF_SORTDOWN);
-        Header_SetItem(header, i, &hi);
-    }
-}
-
-void setGridResult(AppState* st, const QueryResult& r) {
-    ListView_SetItemCount(st->hList, 0);
-    while (ListView_DeleteColumn(st->hList, 0)) {
-    }
-    st->result = r;
-    st->sortColumn = -1;
-    st->sortAscending = true;
-    st->rowOrder.resize(r.rows.size());
-    for (size_t i = 0; i < r.rows.size(); ++i) st->rowOrder[i] = i;
-
-    for (size_t i = 0; i < r.columns.size(); ++i) {
-        LVCOLUMNW col{};
-        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        col.cx = 140;
-        col.iSubItem = static_cast<int>(i);
-        col.pszText = const_cast<LPWSTR>(r.columns[i].c_str());
-        ListView_InsertColumn(st->hList, static_cast<int>(i), &col);
-    }
-    ListView_SetItemCountEx(st->hList, static_cast<int>(r.rows.size()), LVSICF_NOINVALIDATEALL);
-    for (size_t i = 0; i < r.columns.size(); ++i)
-        ListView_SetColumnWidth(st->hList, static_cast<int>(i), LVSCW_AUTOSIZE_USEHEADER);
-    InvalidateRect(st->hList, nullptr, TRUE);
-}
-
+// The results grid is the self-contained SqlGridControl (src/ui/SqlGridControl.*):
+// it owns the data, sort, selection, scrolling, and the per-cell context menu.
 void showResult(AppState* st, const QueryResult& r) {
     wchar_t buf[160];
     if (!r.columns.empty()) {
-        setGridResult(st, r);
+        gridSetResult(st->hList, r);
         std::swprintf(buf, 160, L"%llu rows · %.0f ms",
                       static_cast<unsigned long long>(r.rows.size()), r.executionTimeSec * 1000.0);
     } else {
-        clearGrid(st);
+        gridClear(st->hList);
         std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
                       r.executionTimeSec * 1000.0);
     }
@@ -441,7 +360,7 @@ void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool re
                 showInfoDialog(st->hwnd, L"SQLTerminal", dot->text);
                 break;
             case DotKind::Clear:
-                clearGrid(st);
+                gridClear(st->hList);
                 setStatus(st, L"Cleared.");
                 break;
             case DotKind::Reconnect:
@@ -668,7 +587,6 @@ void doConnectionDetails(AppState* st) {
     showInfoDialog(st->hwnd, L"Connection Details", m);
 }
 
-LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 LRESULT CALLBACK StatusSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 void createChildren(AppState* st, HINSTANCE hInst) {
@@ -676,16 +594,9 @@ void createChildren(AppState* st, HINSTANCE hInst) {
     createFonts(st);
 
     st->hList = CreateWindowExW(
-        0, WC_LISTVIEW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA, 0, 0, 0, 0,
+        0, L"SqlD2DGrid", L"", WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL, 0, 0, 0, 0,
         st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst, nullptr);
-    ListView_SetExtendedListViewStyle(st->hList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-    ListView_SetBkColor(st->hList, th.panelBg);
-    ListView_SetTextBkColor(st->hList, th.panelBg);
-    ListView_SetTextColor(st->hList, th.textPrimary);
     if (th.dark) SetWindowTheme(st->hList, L"DarkMode_Explorer", nullptr);
-    SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
-    SetWindowSubclass(st->hList, ListSubclassProc, 1, reinterpret_cast<DWORD_PTR>(st));
 
     st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                     st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
@@ -1162,77 +1073,6 @@ LRESULT CALLBACK StatusSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
-// Subclass the results ListView so we can dark-custom-draw its header (the
-// header notifies its parent, the ListView, so we intercept it here).
-LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
-                                  DWORD_PTR ref) {
-    auto* st = reinterpret_cast<AppState*>(ref);
-    if (msg == WM_NOTIFY) {
-        auto* nh = reinterpret_cast<NMHDR*>(lParam);
-        if (nh->code == NM_CUSTOMDRAW && nh->hwndFrom == ListView_GetHeader(hwnd)) {
-            auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
-            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
-                const Theme& th = currentTheme();
-                HDC dc = cd->hdc;
-                RECT rc = cd->rc;
-                HBRUSH bg = CreateSolidBrush(th.panelElevBg);
-                FillRect(dc, &rc, bg);
-                DeleteObject(bg);
-                HPEN pen = CreatePen(PS_SOLID, 1, th.border);
-                HGDIOBJ op = SelectObject(dc, pen);
-                MoveToEx(dc, rc.left, rc.bottom - 1, nullptr);
-                LineTo(dc, rc.right, rc.bottom - 1);
-                SelectObject(dc, op);
-                DeleteObject(pen);
-
-                const int col = static_cast<int>(cd->dwItemSpec);
-                wchar_t buf[256] = L"";
-                HDITEMW hi{};
-                hi.mask = HDI_TEXT;
-                hi.pszText = buf;
-                hi.cchTextMax = 256;
-                Header_GetItem(nh->hwndFrom, col, &hi);
-                const bool sorted = (col == st->sortColumn);
-                SetBkMode(dc, TRANSPARENT);
-                SelectObject(dc, st->hUi);
-                SetTextColor(dc, sorted ? th.accent : th.textSecondary);
-                RECT tr = rc;
-                tr.left += dp(10, st->dpi);
-                tr.right -= dp(18, st->dpi);
-                DrawTextW(dc, buf, -1, &tr,
-                          DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
-                if (sorted) {
-                    const int ax = rc.right - dp(12, st->dpi);
-                    const int ay = (rc.top + rc.bottom) / 2;
-                    const int aw = dp(4, st->dpi), ah = dp(3, st->dpi);
-                    POINT tri[3];
-                    if (st->sortAscending) {
-                        tri[0] = {ax, ay - ah};
-                        tri[1] = {ax - aw, ay + ah};
-                        tri[2] = {ax + aw, ay + ah};
-                    } else {
-                        tri[0] = {ax - aw, ay - ah};
-                        tri[1] = {ax + aw, ay - ah};
-                        tri[2] = {ax, ay + ah};
-                    }
-                    HBRUSH ab = CreateSolidBrush(th.accent);
-                    HGDIOBJ oab = SelectObject(dc, ab);
-                    HGDIOBJ oap = SelectObject(dc, GetStockObject(NULL_PEN));
-                    Polygon(dc, tri, 3);
-                    SelectObject(dc, oab);
-                    SelectObject(dc, oap);
-                    DeleteObject(ab);
-                }
-                return CDRF_SKIPDEFAULT;
-            }
-            return CDRF_DODEFAULT;
-        }
-    }
-    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ListSubclassProc, 1);
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
 LRESULT CALLBACK SplitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -1664,12 +1504,7 @@ void reapplyTheme(AppState* st) {
     applyDarkTitleBar(st->hwnd);
     setMenuMode(th.dark);
 
-    ListView_SetBkColor(st->hList, th.panelBg);
-    ListView_SetTextBkColor(st->hList, th.panelBg);
-    ListView_SetTextColor(st->hList, th.textPrimary);
-    SetWindowTheme(st->hList, explorerTheme, nullptr);
-    InvalidateRect(st->hList, nullptr, TRUE);
-    if (HWND header = ListView_GetHeader(st->hList)) InvalidateRect(header, nullptr, TRUE);
+    gridApplyTheme(st->hList);
 
     TreeView_SetBkColor(st->hTree, th.panelBg);
     TreeView_SetTextColor(st->hTree, th.textPrimary);
@@ -1749,7 +1584,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 createFonts(st);
                 SendMessageW(st->hTree, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
-                SendMessageW(st->hList, WM_SETFONT, reinterpret_cast<WPARAM>(st->hMono), TRUE);
+                gridUpdateDpi(st->hList, static_cast<UINT>(st->dpi));
                 editorUpdateDpi(st->hEdit, static_cast<UINT>(st->dpi));
                 auto* sug = reinterpret_cast<RECT*>(lParam);
                 SetWindowPos(hwnd, nullptr, sug->left, sug->top, sug->right - sug->left,
@@ -1788,21 +1623,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (!st->contextTable.empty()) runText(st, selectStatementFor(st->contextTable), false);
             } else if (id == ID_CTX_COPY) {
                 if (!st->contextTable.empty()) copyToClipboard(hwnd, st->contextTable);
-            } else if (id == ID_GRID_VIEW) {
-                showCellDetail(hwnd, columnNameAt(st, st->ctxCol), cellAt(st, st->ctxRow, st->ctxCol));
-            } else if (id == ID_GRID_COPYVAL) {
-                copyToClipboard(hwnd, cellAt(st, st->ctxRow, st->ctxCol));
-            } else if (id == ID_GRID_COPYROW) {
-                std::wstring line;
-                for (int c = 0; c < static_cast<int>(st->result.columns.size()); ++c) {
-                    if (c) line += L'\t';
-                    line += cellAt(st, st->ctxRow, c);
-                }
-                copyToClipboard(hwnd, line);
-            } else if (id == ID_GRID_TSV) {
-                copyToClipboard(hwnd, buildTsv(st->result.columns, displayRows(st)));
-            } else if (id == ID_GRID_CSV) {
-                copyToClipboard(hwnd, buildCsv(st->result.columns, displayRows(st)));
             } else if (id == ID_HISTORY) {
                 doHistory(st);
             } else if (id == ID_CONN_DETAILS) {
@@ -1897,70 +1717,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     return TRUE;
                 }
             }
-            if (st && nh->idFrom == IDC_LIST) {
-                if (nh->code == LVN_GETDISPINFOW) {
-                    auto* di = reinterpret_cast<NMLVDISPINFOW*>(lParam);
-                    if (di->item.mask & LVIF_TEXT) {
-                        const std::wstring& v = cellAt(st, di->item.iItem, di->item.iSubItem);
-                        lstrcpynW(di->item.pszText, v.c_str(), di->item.cchTextMax);
-                    }
-                    return 0;
-                }
-                if (nh->code == LVN_COLUMNCLICK) {
-                    auto* nlv = reinterpret_cast<NMLISTVIEW*>(lParam);
-                    const int col = nlv->iSubItem;
-                    if (st->sortColumn == col)
-                        st->sortAscending = !st->sortAscending;
-                    else {
-                        st->sortColumn = col;
-                        st->sortAscending = true;
-                    }
-                    st->rowOrder = sortedRowOrder(st->result.rows, static_cast<size_t>(col),
-                                                  st->sortAscending);
-                    updateSortArrow(st);
-                    InvalidateRect(st->hList, nullptr, TRUE);
-                    InvalidateRect(ListView_GetHeader(st->hList), nullptr, TRUE);
-                    return 0;
-                }
-                if (nh->code == NM_CUSTOMDRAW) {
-                    auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
-                    if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-                    if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                        const Theme& th = currentTheme();
-                        const int row = static_cast<int>(cd->nmcd.dwItemSpec);
-                        const bool sel =
-                            (ListView_GetItemState(st->hList, row, LVIS_SELECTED) & LVIS_SELECTED) != 0;
-                        if (sel) {
-                            cd->clrText = th.selectionText;
-                            cd->clrTextBk = th.selectionBg;
-                        } else {
-                            cd->clrText = th.textPrimary;
-                            cd->clrTextBk = (row % 2) ? th.altRowBg : th.panelBg;
-                        }
-                        return CDRF_DODEFAULT;
-                    }
-                    return CDRF_DODEFAULT;
-                }
-                if (nh->code == NM_RCLICK) {
-                    auto* ia = reinterpret_cast<NMITEMACTIVATE*>(lParam);
-                    if (ia->iItem >= 0) {
-                        st->ctxRow = ia->iItem;
-                        st->ctxCol = ia->iSubItem >= 0 ? ia->iSubItem : 0;
-                        POINT pt;
-                        GetCursorPos(&pt);
-                        HMENU pm = CreatePopupMenu();
-                        AppendMenuW(pm, MF_STRING, ID_GRID_VIEW, L"View value…");
-                        AppendMenuW(pm, MF_STRING, ID_GRID_COPYVAL, L"Copy value");
-                        AppendMenuW(pm, MF_STRING, ID_GRID_COPYROW, L"Copy row");
-                        AppendMenuW(pm, MF_SEPARATOR, 0, nullptr);
-                        AppendMenuW(pm, MF_STRING, ID_GRID_TSV, L"Copy all as TSV");
-                        AppendMenuW(pm, MF_STRING, ID_GRID_CSV, L"Copy all as CSV");
-                        TrackPopupMenu(pm, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
-                        DestroyMenu(pm);
-                    }
-                    return TRUE;
-                }
-            }
+            // The results grid (SqlGridControl) handles its own notifications,
+            // sorting, and context menu internally.
             return 0;
         }
         case WM_APP_TABLES: {
@@ -1998,7 +1756,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (m->ok) {
                 applyConnectionPersistence(st);
                 st->sslActive = st->session.isSSLActive();
-                clearGrid(st);
+                gridClear(st->hList);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
                 updateFlags(st);
@@ -2045,6 +1803,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
                     MB_ICONERROR | MB_OK);
         return 1;
     }
+    registerSqlGridClass(hInstance);
 
     WNDCLASSEXW splitter{};
     splitter.cbSize = sizeof(splitter);

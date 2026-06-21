@@ -195,6 +195,7 @@ add_executable(SQLTerminal WIN32
   src/WinMain.cpp
   src/ui/MainWindow.cpp
   src/ui/SqlEditorControl.cpp
+  src/ui/SqlGridControl.cpp
   src/ui/ConnectionDialog.cpp
   src/ui/CellDetailDialog.cpp
   src/ui/HistoryDialog.cpp
