@@ -156,6 +156,27 @@ target_include_directories(AppTests PRIVATE tests)
 add_test(NAME AppTests COMMAND AppTests)
 
 # ---------------------------------------------------------------------------
+# Version + build number. BUILD_NUMBER = git commit count, regenerated at
+# configure time into build/generated/version.h.
+# ---------------------------------------------------------------------------
+set(APP_VERSION "0.1.0")
+find_package(Git QUIET)
+set(BUILD_NUMBER 0)
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE BUILD_NUMBER
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+endif()
+if(NOT BUILD_NUMBER MATCHES "^[0-9]+$")
+  set(BUILD_NUMBER 0)
+endif()
+configure_file("${CMAKE_SOURCE_DIR}/src/version.h.in"
+               "${CMAKE_BINARY_DIR}/generated/version.h" @ONLY)
+
+# ---------------------------------------------------------------------------
 # SQLTerminal — the Win32 GUI app.
 # ---------------------------------------------------------------------------
 add_executable(SQLTerminal WIN32
@@ -173,6 +194,7 @@ set_source_files_properties(packaging/SQLTerminal.rc PROPERTIES
   OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.ico;${CMAKE_CURRENT_SOURCE_DIR}/packaging/app.manifest")
 target_link_libraries(SQLTerminal PRIVATE
   SqlDb SqlCore SqlStore SqlApp WinSparkle comctl32 comdlg32 dwmapi uxtheme)
+target_include_directories(SQLTerminal PRIVATE "${CMAKE_BINARY_DIR}/generated")
 # Our manifest is embedded via the .rc; stop the linker generating a competing one.
 if(MSVC)
   target_link_options(SQLTerminal PRIVATE /MANIFEST:NO)

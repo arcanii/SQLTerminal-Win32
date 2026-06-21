@@ -38,6 +38,7 @@
 #include "platform/Updater.h"
 #include "resource.h"
 #include "security/CredentialStore.h"
+#include "version.h"
 #include "ui/CellDetailDialog.h"
 #include "ui/ConnectionDialog.h"
 #include "ui/HistoryDialog.h"
@@ -1262,12 +1263,120 @@ HWND createMainWindow(int nCmdShow) {
     return hwnd;
 }
 
-void doAbout(HWND hwnd) {
-    MessageBoxW(hwnd,
-                L"SQLTerminal (Win32)  0.1.0\n\n"
-                L"A native Windows SQL terminal for SQLite and PostgreSQL.\n"
-                L"Licensed under GPL-3.0.",
-                L"About SQLTerminal", MB_OK | MB_ICONINFORMATION);
+// ---- About dialog (custom, dark, app icon + build number) -------------------
+struct AboutState {
+    UINT dpi = 96;
+    bool done = false;
+};
+
+LRESULT CALLBACK AboutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* st = reinterpret_cast<AboutState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_NCCREATE: {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            return dialogCtlColor(msg, wParam);
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            const Theme& th = currentTheme();
+            const int d = st->dpi;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, themeBrush(th.panelBg));
+            HICON ic = LoadIconW(g_appInstance, MAKEINTRESOURCEW(IDI_APPICON));
+            DrawIconEx(hdc, dpiScale(22, d), dpiScale(22, d), ic, dpiScale(56, d), dpiScale(56, d), 0,
+                       nullptr, DI_NORMAL);
+            SetBkMode(hdc, TRANSPARENT);
+            HFONT title = CreateFontW(-dpiScale(19, d), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+            HFONT body = CreateFontW(-dpiScale(14, d), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+            auto line = [&](HFONT f, COLORREF c, const wchar_t* s, int x, int y) {
+                SelectObject(hdc, f);
+                SetTextColor(hdc, c);
+                RECT r{dpiScale(x, d), dpiScale(y, d), rc.right - dpiScale(14, d), rc.bottom};
+                DrawTextW(hdc, s, -1, &r, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            };
+            line(title, th.textPrimary, L"SQLTerminal (Win32)", 92, 24);
+            line(body, th.accent, L"Version " SQLT_VERSION_DISPLAY_W, 92, 52);
+            line(body, th.textPrimary, L"A native Windows SQL terminal for SQLite and PostgreSQL.", 22,
+                 96);
+            line(body, th.textSecondary, L"Licensed under GPL-3.0.", 22, 120);
+            DeleteObject(title);
+            DeleteObject(body);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) st->done = true;
+            return 0;
+        case WM_CLOSE:
+            st->done = true;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void doAbout(HWND owner) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = AboutProc;
+        wc.hInstance = g_appInstance;
+        wc.lpszClassName = L"SQLTerminalAbout";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = themeBrush(currentTheme().panelBg);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    AboutState st;
+    const int W = 440, H = 196;
+    const UINT odpi = GetDpiForWindow(owner);
+    RECT orc{};
+    GetWindowRect(owner, &orc);
+    const int fullW = dpiScale(W + 16, odpi), fullH = dpiScale(H + 39, odpi);
+    const int x = orc.left + ((orc.right - orc.left) - fullW) / 2;
+    const int y = orc.top + ((orc.bottom - orc.top) - fullH) / 2;
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"SQLTerminalAbout", L"About SQLTerminal",
+                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, fullW, fullH, owner, nullptr,
+                                g_appInstance, &st);
+    if (!hwnd) return;
+    st.dpi = GetDpiForWindow(hwnd);
+    HFONT okFont = CreateFontW(-dpiScale(14, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK",
+                              WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                              dpiScale(W - 100, st.dpi), dpiScale(H - 44, st.dpi), dpiScale(88, st.dpi),
+                              dpiScale(28, st.dpi), hwnd,
+                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), g_appInstance,
+                              nullptr);
+    SendMessageW(ok, WM_SETFONT, reinterpret_cast<WPARAM>(okFont), TRUE);
+    applyDialogDarkMode(hwnd);
+    EnableWindow(owner, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    DestroyWindow(hwnd);
+    DeleteObject(okFont);
 }
 
 void doHelp(HWND hwnd) {
