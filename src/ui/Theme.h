@@ -90,10 +90,18 @@ inline bool systemUsesDarkMode() {
     return value == 0;
 }
 
+// Theme override: -1 = follow system, 0 = force light, 1 = force dark.
+inline int& themeOverride() {
+    static int mode = -1;
+    return mode;
+}
+
 inline const Theme& currentTheme() {
     static const Theme dark = makeDarkTheme();
     static const Theme light = makeLightTheme();
-    return systemUsesDarkMode() ? dark : light;
+    const int o = themeOverride();
+    const bool useDark = (o < 0) ? systemUsesDarkMode() : (o == 1);
+    return useDark ? dark : light;
 }
 
 // ---- shared dialog dark-mode + DPI helpers ----------------------------------

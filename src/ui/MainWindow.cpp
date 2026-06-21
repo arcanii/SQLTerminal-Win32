@@ -81,6 +81,7 @@ enum : int {
     ID_HELP = 1026,
     ID_CHECK_UPDATES = 1027,
     ID_MENU = 1028,
+    ID_TOGGLE_THEME = 1029,
     IDC_LIST = 2001,
     IDC_EDIT = 2002,
     IDC_SPLIT = 2004,
@@ -339,6 +340,19 @@ void layout(AppState* st) {
     MoveWindow(st->hList, rx, top, rw, listH, TRUE);
     MoveWindow(st->hSplitter, rx, top + listH, rw, splitH, TRUE);
     MoveWindow(st->hEdit, rx, top + listH + splitH, rw, editH, TRUE);
+
+    // Rounded "card" corners on the content panels (corners reveal the window bg).
+    const int pr = dp(6, d);
+    auto roundPanel = [&](HWND h, int w, int hh) {
+        SetWindowRgn(h,
+                     (w > 2 * pr && hh > 2 * pr)
+                         ? CreateRoundRectRgn(0, 0, w + 1, hh + 1, pr * 2, pr * 2)
+                         : nullptr,
+                     TRUE);
+    };
+    roundPanel(st->hTree, sw, ch);
+    roundPanel(st->hList, rw, listH);
+    roundPanel(st->hEdit, rw, editH);
 
     if (st->hStatus) {
         int parts[2] = {cw - dp(220, d), -1};
@@ -736,9 +750,13 @@ HMENU buildMenuPopup(AppState* st) {
     AppendMenuW(help, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(help, MF_STRING, ID_ABOUT, L"About SQLTerminal");
 
+    HMENU view = CreatePopupMenu();
+    AppendMenuW(view, MF_STRING, ID_TOGGLE_THEME, L"Toggle light / dark theme");
+
     HMENU root = CreatePopupMenu();
     AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"File");
     AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(query), L"Query");
+    AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"View");
     AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"Help");
     return root;
 }
@@ -1395,6 +1413,49 @@ void doHelp(HWND hwnd) {
                 L"SQLTerminal Help", MB_OK | MB_ICONINFORMATION);
 }
 
+// Force popup/context menus to the given mode (uxtheme ordinals; guarded).
+void setMenuMode(bool dark) {
+    HMODULE ux = GetModuleHandleW(L"uxtheme.dll");
+    if (!ux) return;
+    using SetModeFn = int(WINAPI*)(int);
+    using FlushFn = void(WINAPI*)();
+    auto setMode = reinterpret_cast<SetModeFn>(GetProcAddress(ux, MAKEINTRESOURCEA(135)));
+    auto flush = reinterpret_cast<FlushFn>(GetProcAddress(ux, MAKEINTRESOURCEA(136)));
+    if (setMode) setMode(dark ? 2 : 3);  // ForceDark / ForceLight
+    if (flush) flush();
+}
+
+// Re-apply the current theme to every live control (for the in-app toggle).
+void reapplyTheme(AppState* st) {
+    const Theme& th = currentTheme();
+    const wchar_t* explorerTheme = th.dark ? L"DarkMode_Explorer" : L"Explorer";
+
+    applyDarkTitleBar(st->hwnd);
+    setMenuMode(th.dark);
+
+    ListView_SetBkColor(st->hList, th.panelBg);
+    ListView_SetTextBkColor(st->hList, th.panelBg);
+    ListView_SetTextColor(st->hList, th.textPrimary);
+    SetWindowTheme(st->hList, explorerTheme, nullptr);
+    InvalidateRect(st->hList, nullptr, TRUE);
+    if (HWND header = ListView_GetHeader(st->hList)) InvalidateRect(header, nullptr, TRUE);
+
+    TreeView_SetBkColor(st->hTree, th.panelBg);
+    TreeView_SetTextColor(st->hTree, th.textPrimary);
+    SetWindowTheme(st->hTree, explorerTheme, nullptr);
+    InvalidateRect(st->hTree, nullptr, TRUE);
+
+    SendMessageW(st->hEdit, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(th.windowBg));
+    SetWindowTheme(st->hEdit, explorerTheme, nullptr);
+    applyHighlight(st);  // re-colors the syntax + base text
+
+    InvalidateRect(st->hCmdBar, nullptr, TRUE);
+    InvalidateRect(st->hStatus, nullptr, TRUE);
+    InvalidateRect(st->hSplitter, nullptr, TRUE);
+    InvalidateRect(st->hVSplitter, nullptr, TRUE);
+    InvalidateRect(st->hwnd, nullptr, TRUE);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -1421,6 +1482,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE:
             if (st) layout(st);
             return 0;
+        case WM_ERASEBKGND: {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, themeBrush(currentTheme().windowBg));
+            return 1;
+        }
         case WM_DPICHANGED:
             if (st) {
                 const int oldDpi = st->dpi;
@@ -1495,6 +1562,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 createMainWindow(SW_SHOW);
             } else if (id == ID_CLOSE) {
                 DestroyWindow(hwnd);
+            } else if (id == ID_TOGGLE_THEME) {
+                themeOverride() = currentTheme().dark ? 0 : 1;
+                reapplyTheme(st);
             } else if (id == ID_ABOUT) {
                 doAbout(hwnd);
             } else if (id == ID_HELP) {
