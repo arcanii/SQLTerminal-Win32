@@ -129,6 +129,7 @@ struct AppState {
     HFONT hGlyph = nullptr;     // Segoe MDL2 Assets, for command-bar icons
     HWND hCmdBar = nullptr;     // custom top command bar (replaces the menu)
     int cmdHover = -1;          // hovered command-bar button index, or -1
+    int capHover = -1;          // hovered caption button (0=min 1=max 2=close), or -1
     int dpi = 96;               // window DPI (per-monitor-v2)
     std::wstring statusMsg;   // owner-drawn status bar, left part
     std::wstring flagsText;   // owner-drawn status bar, right part (SSL/read-only/tx)
@@ -785,7 +786,7 @@ const CmdItem kCmdItems[] = {
 };
 constexpr int kCmdCount = static_cast<int>(sizeof(kCmdItems) / sizeof(kCmdItems[0]));
 
-void cmdRects(HWND bar, RECT btn[kCmdCount], RECT* chip) {
+void cmdRects(HWND bar, RECT btn[kCmdCount], RECT* chip, RECT cap[3]) {
     auto* st = reinterpret_cast<AppState*>(GetWindowLongPtrW(bar, GWLP_USERDATA));
     const int d = st ? st->dpi : 96;
     RECT rc;
@@ -796,8 +797,13 @@ void cmdRects(HWND bar, RECT btn[kCmdCount], RECT* chip) {
         btn[i] = {x, dp(7, d), x + w, rc.bottom - dp(8, d)};
         x += w + dp(6, d);
     }
+    // Caption buttons (min / max / close), full height, flush to the right edge.
+    const int capW = dp(46, d);
+    for (int i = 0; i < 3; ++i)
+        cap[i] = {rc.right - capW * (3 - i), 0, rc.right - capW * (2 - i), rc.bottom};
     const int chipW = dp(196, d);
-    *chip = {rc.right - chipW - dp(10, d), dp(8, d), rc.right - dp(10, d), rc.bottom - dp(9, d)};
+    const int chipRight = rc.right - capW * 3 - dp(8, d);
+    *chip = {chipRight - chipW, dp(8, d), chipRight, rc.bottom - dp(9, d)};
 }
 
 void fillRound(HDC dc, const RECT& r, COLORREF fill, COLORREF edge, int radius) {
@@ -840,7 +846,8 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             RECT btn[kCmdCount];
             RECT chip;
-            cmdRects(hwnd, btn, &chip);
+            RECT cap[3];
+            cmdRects(hwnd, btn, &chip, cap);
             const bool busy = st && st->busy;
             for (int i = 0; i < kCmdCount; ++i) {
                 const CmdItem& it = kCmdItems[i];
@@ -887,6 +894,48 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DrawTextW(dc, chipText.c_str(), -1, &cr,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
 
+            // Caption buttons: minimize / maximize-restore / close.
+            const bool zoomed = IsZoomed(st->hwnd) != 0;
+            for (int i = 0; i < 3; ++i) {
+                const bool chov = st && st->capHover == i;
+                const bool isClose = (i == 2);
+                if (chov) {
+                    HBRUSH hb = CreateSolidBrush(isClose ? RGB(196, 43, 28) : th.hoverBg);
+                    FillRect(dc, &cap[i], hb);
+                    DeleteObject(hb);
+                }
+                const COLORREF gc = (chov && isClose) ? RGB(255, 255, 255)
+                                                      : (chov ? th.textPrimary : th.textSecondary);
+                HPEN gp = CreatePen(PS_SOLID, (std::max)(1, dp(1, st->dpi)), gc);
+                HGDIOBJ ogp = SelectObject(dc, gp);
+                HGDIOBJ obr = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                const int mx = (cap[i].left + cap[i].right) / 2;
+                const int my = (cap[i].top + cap[i].bottom) / 2;
+                const int s = dp(5, st->dpi);
+                if (i == 0) {  // minimize
+                    MoveToEx(dc, mx - s, my, nullptr);
+                    LineTo(dc, mx + s + 1, my);
+                } else if (i == 1) {  // maximize / restore
+                    if (zoomed) {
+                        Rectangle(dc, mx - s, my - s + 2, mx + s - 2, my + s);
+                        MoveToEx(dc, mx - s + 2, my - s + 2, nullptr);
+                        LineTo(dc, mx - s + 2, my - s);
+                        LineTo(dc, mx + s, my - s);
+                        LineTo(dc, mx + s, my + s - 2);
+                    } else {
+                        Rectangle(dc, mx - s, my - s, mx + s, my + s);
+                    }
+                } else {  // close
+                    MoveToEx(dc, mx - s, my - s, nullptr);
+                    LineTo(dc, mx + s + 1, my + s + 1);
+                    MoveToEx(dc, mx + s, my - s, nullptr);
+                    LineTo(dc, mx - s - 1, my + s + 1);
+                }
+                SelectObject(dc, ogp);
+                SelectObject(dc, obr);
+                DeleteObject(gp);
+            }
+
             BitBlt(hdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
             SelectObject(dc, obmp);
             DeleteObject(bmp);
@@ -898,12 +947,17 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             RECT btn[kCmdCount];
             RECT chip;
-            cmdRects(hwnd, btn, &chip);
+            RECT cap[3];
+            cmdRects(hwnd, btn, &chip, cap);
             int hov = -1;
             for (int i = 0; i < kCmdCount; ++i)
                 if (PtInRect(&btn[i], pt)) hov = i;
-            if (st && hov != st->cmdHover) {
+            int chov = -1;
+            for (int i = 0; i < 3; ++i)
+                if (PtInRect(&cap[i], pt)) chov = i;
+            if (st && (hov != st->cmdHover || chov != st->capHover)) {
                 st->cmdHover = hov;
+                st->capHover = chov;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
                 TrackMouseEvent(&tme);
@@ -911,8 +965,9 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_MOUSELEAVE:
-            if (st && st->cmdHover != -1) {
+            if (st && (st->cmdHover != -1 || st->capHover != -1)) {
                 st->cmdHover = -1;
+                st->capHover = -1;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -920,14 +975,55 @@ LRESULT CALLBACK CmdBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             RECT btn[kCmdCount];
             RECT chip;
-            cmdRects(hwnd, btn, &chip);
+            RECT cap[3];
+            cmdRects(hwnd, btn, &chip, cap);
             for (int i = 0; i < kCmdCount; ++i) {
                 if (PtInRect(&btn[i], pt)) {
                     SendMessageW(st->hwnd, WM_COMMAND, MAKEWPARAM(kCmdItems[i].id, 0), 0);
                     return 0;
                 }
             }
-            if (PtInRect(&chip, pt)) SendMessageW(st->hwnd, WM_COMMAND, MAKEWPARAM(ID_OPEN, 0), 0);
+            if (PtInRect(&chip, pt)) {
+                SendMessageW(st->hwnd, WM_COMMAND, MAKEWPARAM(ID_OPEN, 0), 0);
+                return 0;
+            }
+            if (PtInRect(&cap[0], pt)) {
+                SendMessageW(st->hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+                return 0;
+            }
+            if (PtInRect(&cap[1], pt)) {
+                SendMessageW(st->hwnd, WM_SYSCOMMAND, IsZoomed(st->hwnd) ? SC_RESTORE : SC_MAXIMIZE,
+                             0);
+                return 0;
+            }
+            if (PtInRect(&cap[2], pt)) {
+                SendMessageW(st->hwnd, WM_CLOSE, 0, 0);
+                return 0;
+            }
+            // Empty area: only begin a window drag once the pointer actually moves,
+            // so a plain click falls through and WM_LBUTTONDBLCLK (maximize) can fire.
+            POINT scr = pt;
+            ClientToScreen(hwnd, &scr);
+            if (DragDetect(hwnd, scr)) {
+                ReleaseCapture();
+                SendMessageW(st->hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK: {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            RECT btn[kCmdCount];
+            RECT chip;
+            RECT cap[3];
+            cmdRects(hwnd, btn, &chip, cap);
+            bool onControl = PtInRect(&chip, pt) != 0;
+            for (int i = 0; i < kCmdCount; ++i)
+                if (PtInRect(&btn[i], pt)) onControl = true;
+            for (int i = 0; i < 3; ++i)
+                if (PtInRect(&cap[i], pt)) onControl = true;
+            if (!onControl)
+                SendMessageW(st->hwnd, WM_SYSCOMMAND, IsZoomed(st->hwnd) ? SC_RESTORE : SC_MAXIMIZE,
+                             0);
             return 0;
         }
     }
@@ -1467,7 +1563,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ++g_windowCount;
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-        case WM_CREATE:
+        case WM_CREATE: {
             st->dpi = static_cast<int>(GetDpiForWindow(hwnd));
             st->sidebarWidth = dp(st->sidebarWidth, st->dpi);
             st->editorHeight = dp(st->editorHeight, st->dpi);
@@ -1475,7 +1571,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             createChildren(st, reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance);
             layout(st);
             applyDarkTitleBar(hwnd);
+            DWORD corner = 2;  // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &corner, sizeof(corner));
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
+        }
+        // Custom title bar: drop the standard caption, keep the resize frame. The
+        // command bar paints the caption + window buttons and drives drag/min/max/close.
+        case WM_NCCALCSIZE: {
+            if (!wParam) break;  // fall through to DefWindowProc
+            auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+            const UINT dpi = GetDpiForWindow(hwnd);
+            const int frameX = GetSystemMetricsForDpi(SM_CXFRAME, dpi) +
+                               GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            const int frameY = GetSystemMetricsForDpi(SM_CYFRAME, dpi) +
+                               GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            RECT& r = params->rgrc[0];
+            r.left += frameX;
+            r.right -= frameX;
+            r.bottom -= frameY;
+            if (IsZoomed(hwnd)) r.top += frameY;  // maximized: avoid top clip
+            return 0;                             // else: reclaim the caption area
+        }
         case WM_SETTINGCHANGE:
             applyDarkTitleBar(hwnd);  // react to light/dark toggle
             return 0;
@@ -1799,6 +1917,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
 
     WNDCLASSEXW splitter{};
     splitter.cbSize = sizeof(splitter);
+    splitter.style = CS_HREDRAW | CS_VREDRAW;  // fully repaint the separator on resize
     splitter.lpfnWndProc = SplitterProc;
     splitter.hInstance = hInstance;
     splitter.lpszClassName = kSplitterClass;
@@ -1808,6 +1927,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
 
     WNDCLASSEXW vsplitter{};
     vsplitter.cbSize = sizeof(vsplitter);
+    vsplitter.style = CS_HREDRAW | CS_VREDRAW;
     vsplitter.lpfnWndProc = VSplitterProc;
     vsplitter.hInstance = hInstance;
     vsplitter.lpszClassName = kVSplitterClass;
@@ -1817,6 +1937,7 @@ int runApp(HINSTANCE hInstance, int nCmdShow) {
 
     WNDCLASSEXW cmdbar{};
     cmdbar.cbSize = sizeof(cmdbar);
+    cmdbar.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;  // dbl-click + full repaint on resize
     cmdbar.lpfnWndProc = CmdBarProc;
     cmdbar.hInstance = hInstance;
     cmdbar.lpszClassName = kCmdBarClass;
