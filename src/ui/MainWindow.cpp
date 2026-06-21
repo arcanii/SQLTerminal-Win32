@@ -656,7 +656,16 @@ void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body) 
     HFONT ui = CreateFontW(-dpiScale(14, st.dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
-    HWND edit = CreateWindowExW(0, L"EDIT", body.c_str(),
+    std::wstring bodyCrlf;  // EDIT controls render bare LF as a box — use CRLF.
+    bodyCrlf.reserve(body.size() + 32);
+    for (wchar_t c : body) {
+        if (c == L'\r') continue;
+        if (c == L'\n')
+            bodyCrlf += L"\r\n";
+        else
+            bodyCrlf += c;
+    }
+    HWND edit = CreateWindowExW(0, L"EDIT", bodyCrlf.c_str(),
                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY |
                                     ES_AUTOVSCROLL,
                                 dpiScale(14, st.dpi), dpiScale(12, st.dpi), dpiScale(W - 28, st.dpi),
