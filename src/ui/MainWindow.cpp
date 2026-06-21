@@ -10,6 +10,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 
@@ -1353,6 +1354,8 @@ HWND createMainWindow(int nCmdShow) {
 struct AboutState {
     UINT dpi = 96;
     bool done = false;
+    RECT githubRect{};  // "GitHub" link bounds (client px) for cursor + click hit-testing
+    RECT issueRect{};   // "Report Issue" link bounds (client px)
 };
 
 LRESULT CALLBACK AboutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1395,11 +1398,52 @@ LRESULT CALLBACK AboutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             line(body, th.textPrimary, L"A native Windows SQL terminal for SQLite and PostgreSQL.", 22,
                  96);
             line(body, th.textSecondary, L"Licensed under GPL-3.0.", 22, 120);
+            // Clickable links (accent + underline); store bounds for cursor + click.
+            HFONT link = CreateFontW(-dpiScale(14, d), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Segoe UI");
+            SelectObject(hdc, link);
+            SetTextColor(hdc, th.accent);
+            auto drawLink = [&](const wchar_t* s, int px, int py) -> RECT {
+                SIZE sz;
+                GetTextExtentPoint32W(hdc, s, lstrlenW(s), &sz);
+                TextOutW(hdc, px, py, s, lstrlenW(s));
+                return RECT{px, py, px + sz.cx, py + sz.cy};
+            };
+            const int linkY = dpiScale(150, d);
+            st->githubRect = drawLink(L"GitHub", dpiScale(22, d), linkY);
+            st->issueRect = drawLink(L"Report Issue", st->githubRect.right + dpiScale(18, d), linkY);
+            line(body, th.textSecondary, L"for Daniel Kenny and Bryan Mark", 22, 178);
+            SelectObject(hdc, GetStockObject(SYSTEM_FONT));
             DeleteObject(title);
             DeleteObject(body);
+            DeleteObject(link);
             EndPaint(hwnd, &ps);
             return 0;
         }
+        case WM_SETCURSOR:
+            if (st && LOWORD(lParam) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                if (PtInRect(&st->githubRect, pt) || PtInRect(&st->issueRect, pt)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+        case WM_LBUTTONDOWN:
+            if (st) {
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                if (PtInRect(&st->githubRect, pt))
+                    ShellExecuteW(hwnd, L"open", L"https://github.com/arcanii/SQLTerminal-Win32",
+                                  nullptr, nullptr, SW_SHOWNORMAL);
+                else if (PtInRect(&st->issueRect, pt))
+                    ShellExecuteW(hwnd, L"open",
+                                  L"https://github.com/arcanii/SQLTerminal-Win32/issues", nullptr,
+                                  nullptr, SW_SHOWNORMAL);
+            }
+            return 0;
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) st->done = true;
             return 0;
@@ -1425,7 +1469,7 @@ void doAbout(HWND owner) {
     }
 
     AboutState st;
-    const int W = 440, H = 196;
+    const int W = 440, H = 244;
     const UINT odpi = GetDpiForWindow(owner);
     RECT orc{};
     GetWindowRect(owner, &orc);
