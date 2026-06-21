@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>SQLTerminal (Win32) Updates</title>
+    <link>https://raw.githubusercontent.com/arcanii/SQLTerminal-Win32/main/appcast.xml</link>
+    <description>Most recent updates to SQLTerminal for Windows</description>
+    <language>en</language>
+    <item>
+      <title>Version 0.1.0.48</title>
+      <sparkle:releaseNotesLink>https://github.com/arcanii/SQLTerminal-Win32/releases/tag/v0.1.0.48</sparkle:releaseNotesLink>
+      <pubDate>Sun, 21 Jun 2026 09:50:30 +0000</pubDate>
+      <enclosure url="https://github.com/arcanii/SQLTerminal-Win32/releases/download/v0.1.0.48/SQLTerminal-0.1.0-setup.exe"
+                 sparkle:version="0.1.0.48"
+                 sparkle:edSignature="zjxRRRu2P4uh8sRxnS6M5XUrPOk+aLVJ5w6gSXZyecU7u70Cw5hirQArWdOQZwzheREdhjIFxE5KAL3OKkmmAg=="
+                 length="6266591"
+                 type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
