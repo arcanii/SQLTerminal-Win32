@@ -41,6 +41,7 @@
 #include "ui/HistoryDialog.h"
 #include "ui/SqlEditorControl.h"
 #include "ui/SqlGridControl.h"
+#include "ui/ThemedDialog.h"
 #include "ui/Theme.h"
 
 namespace sqlterm {
@@ -319,8 +320,8 @@ void guardAndRun(AppState* st, const std::vector<std::wstring>& statements) {
         return;
     }
     if (d.action == GuardAction::Confirm) {
-        if (MessageBoxW(st->hwnd, d.message.c_str(), L"Confirm destructive statement",
-                        MB_YESNO | MB_ICONWARNING) != IDYES) {
+        if (themedMessageBox(st->hwnd, d.message.c_str(), L"Confirm destructive statement",
+                             MB_YESNO | MB_ICONWARNING) != IDYES) {
             setStatus(st, L"Cancelled — destructive statement not run.");
             return;
         }
@@ -1764,7 +1765,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 st->sslActive = false;
                 updateFlags(st);
-                MessageBoxW(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
+                themedMessageBox(hwnd, m->error.c_str(), L"Connection failed", MB_ICONERROR | MB_OK);
                 setStatus(st, L"Connection failed.");
             }
             if (st->hCmdBar) InvalidateRect(st->hCmdBar, nullptr, FALSE);

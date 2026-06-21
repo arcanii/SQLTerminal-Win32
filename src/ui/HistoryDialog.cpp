@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "persistence/Stores.h"
+#include "ui/ThemedDialog.h"
 #include "ui/Theme.h"
 
 namespace sqlterm {
@@ -149,8 +150,8 @@ LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             SnippetStore::remove(snips[static_cast<size_t>(idx)]);
                         repopulate(st);
                     }
-                } else if (MessageBoxW(hwnd, L"Clear all query history?", L"Confirm",
-                                       MB_YESNO | MB_ICONWARNING) == IDYES) {
+                } else if (themedMessageBox(hwnd, L"Clear all query history?", L"Confirm",
+                                            MB_YESNO | MB_ICONWARNING) == IDYES) {
                     QueryHistoryStore::clear();
                     repopulate(st);
                 }
