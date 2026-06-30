@@ -19,6 +19,11 @@ int smartCompare(const std::wstring& a, const std::wstring& b);
 std::vector<size_t> sortedRowOrder(const std::vector<std::vector<std::wstring>>& rows,
                                    size_t column, bool ascending);
 
+// True if any cell of `row` contains `needleLower` (case-insensitive substring).
+// `needleLower` must already be lower-cased; an empty needle matches every row.
+// Drives the results-grid full-text row filter.
+bool rowMatchesFilter(const std::vector<std::wstring>& row, const std::wstring& needleLower);
+
 std::wstring csvEscape(const std::wstring& value);
 std::wstring buildTsv(const std::vector<std::wstring>& columns,
                       const std::vector<std::vector<std::wstring>>& rows);

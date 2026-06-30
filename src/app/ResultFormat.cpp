@@ -144,4 +144,18 @@ std::optional<std::wstring> prettyPrintJson(const std::wstring& value) {
     }
 }
 
+bool rowMatchesFilter(const std::vector<std::wstring>& row, const std::wstring& needleLower) {
+    if (needleLower.empty()) return true;
+    const size_t n = needleLower.size();
+    for (const std::wstring& cell : row) {
+        if (cell.size() < n) continue;
+        for (size_t i = 0; i + n <= cell.size(); ++i) {
+            size_t j = 0;
+            while (j < n && static_cast<wchar_t>(towlower(cell[i + j])) == needleLower[j]) ++j;
+            if (j == n) return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace sqlterm

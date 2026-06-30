@@ -30,6 +30,24 @@ static std::string dbg(const vector<size_t>& v) {
 }
 static bool has(const wstring& s, const wstring& sub) { return s.find(sub) != wstring::npos; }
 
+// ===== ResultFormat: full-text row filter ====================================
+
+TEST(result_filter_matches) {
+    vector<wstring> row{L"Alice", L"alice@EXAMPLE.com", L"42"};
+    CHECK(rowMatchesFilter(row, L""));         // empty needle matches everything
+    CHECK(rowMatchesFilter(row, L"alice"));    // case-insensitive vs "Alice"
+    CHECK(rowMatchesFilter(row, L"example"));  // case-insensitive vs uppercase cell
+    CHECK(rowMatchesFilter(row, L"42"));       // numeric cell
+    CHECK(rowMatchesFilter(row, L"@"));        // substring inside a cell
+    CHECK(!rowMatchesFilter(row, L"zzz"));     // no match
+    CHECK(!rowMatchesFilter(row, L"alicee"));  // not contiguous in any cell
+}
+TEST(result_filter_edge) {
+    CHECK(!rowMatchesFilter(vector<wstring>{}, L"x"));            // no cells
+    CHECK(rowMatchesFilter(vector<wstring>{}, L""));             // empty needle still matches
+    CHECK(!rowMatchesFilter(vector<wstring>{L"", L""}, L"x"));   // empty cells
+}
+
 // ===== DotCommandHandler =====================================================
 
 TEST(dot_not_a_command) {

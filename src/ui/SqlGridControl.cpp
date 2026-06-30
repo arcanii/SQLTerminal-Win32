@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,7 @@ struct GridState {
 
     QueryResult result;
     std::vector<size_t> rowOrder;  // display index -> data row index
+    std::wstring filterLower;      // lower-cased full-text row filter ("" = no filter)
     std::vector<int> colWidth;     // device px, per column
     int sortColumn = -1;
     bool sortAscending = true;
@@ -431,6 +433,25 @@ void paint(GridState* st) {
 
 // ---- actions ---------------------------------------------------------------
 
+// Rebuild rowOrder = (current filter) applied over (current sort, or identity).
+void applyFilterSort(GridState* st) {
+    std::vector<size_t> base;
+    if (st->sortColumn >= 0) {
+        base = sortedRowOrder(st->result.rows, static_cast<size_t>(st->sortColumn), st->sortAscending);
+    } else {
+        base.resize(st->result.rows.size());
+        for (size_t i = 0; i < base.size(); ++i) base[i] = i;
+    }
+    if (st->filterLower.empty()) {
+        st->rowOrder = std::move(base);
+    } else {
+        st->rowOrder.clear();
+        st->rowOrder.reserve(base.size());
+        for (size_t src : base)
+            if (rowMatchesFilter(st->result.rows[src], st->filterLower)) st->rowOrder.push_back(src);
+    }
+}
+
 void sortByColumn(GridState* st, int col) {
     if (col < 0 || col >= columnCount(st)) return;
     if (col == st->sortColumn)
@@ -439,7 +460,7 @@ void sortByColumn(GridState* st, int col) {
         st->sortColumn = col;
         st->sortAscending = true;
     }
-    st->rowOrder = sortedRowOrder(st->result.rows, static_cast<size_t>(col), st->sortAscending);
+    applyFilterSort(st);
     st->selectedRow = -1;  // a display index would point at a different row after reordering
     InvalidateRect(st->hwnd, nullptr, FALSE);
 }
@@ -761,10 +782,10 @@ void gridSetResult(HWND grid, const QueryResult& result) {
     cancelResize(st);  // a query result can be posted while a column drag is in progress
     ensureFormats(st);
     st->result = result;
-    st->rowOrder.resize(result.rows.size());
-    for (size_t i = 0; i < result.rows.size(); ++i) st->rowOrder[i] = i;
+    st->filterLower.clear();
     st->sortColumn = -1;
     st->sortAscending = true;
+    applyFilterSort(st);  // identity order (no sort, no filter)
     st->selectedRow = -1;
     st->scrollX = st->scrollY = 0;
     autoSizeColumns(st);
@@ -780,6 +801,7 @@ void gridClear(HWND grid) {
     st->result = QueryResult{};
     st->rowOrder.clear();
     st->colWidth.clear();
+    st->filterLower.clear();
     st->sortColumn = -1;
     st->sortAscending = true;
     st->selectedRow = -1;
@@ -787,6 +809,31 @@ void gridClear(HWND grid) {
     st->scrollX = st->scrollY = 0;
     updateScrollbars(st);
     InvalidateRect(grid, nullptr, FALSE);
+}
+
+void gridSetFilter(HWND grid, const std::wstring& text) {
+    GridState* st = state(grid);
+    if (!st) return;
+    std::wstring lower = text;
+    for (wchar_t& c : lower) c = static_cast<wchar_t>(towlower(c));
+    if (lower == st->filterLower) return;
+    st->filterLower = std::move(lower);
+    applyFilterSort(st);
+    st->selectedRow = -1;
+    st->scrollY = 0;  // show the top of the filtered set
+    clampScroll(st);
+    updateScrollbars(st);
+    InvalidateRect(grid, nullptr, FALSE);
+}
+
+void gridGetCounts(HWND grid, int& shown, int& total) {
+    GridState* st = state(grid);
+    if (!st) {
+        shown = total = 0;
+        return;
+    }
+    shown = static_cast<int>(st->rowOrder.size());
+    total = static_cast<int>(st->result.rows.size());
 }
 
 void gridApplyTheme(HWND grid) {

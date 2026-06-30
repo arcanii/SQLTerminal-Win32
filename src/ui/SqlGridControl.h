@@ -14,6 +14,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 #include "models/QueryResult.h"
 
 namespace sqlterm {
@@ -33,5 +35,12 @@ void gridApplyTheme(HWND grid);
 
 // Rebuild text formats/metrics at the new DPI (scales column widths) and repaint.
 void gridUpdateDpi(HWND grid, UINT dpi);
+
+// Set the full-text row filter (case-insensitive; matches any column). Empty text
+// clears it. Rebuilds the displayed row order = filter applied over the current sort.
+void gridSetFilter(HWND grid, const std::wstring& text);
+
+// Filtered (shown) and total data-row counts, for a "N of M" readout.
+void gridGetCounts(HWND grid, int& shown, int& total);
 
 }  // namespace sqlterm

@@ -84,6 +84,8 @@ enum : int {
     IDC_STATUS = 2005,
     IDC_TREE = 2006,
     IDC_VSPLIT = 2007,
+    IDC_SEARCH = 2008,
+    IDC_SEARCHCOUNT = 2009,
 };
 
 constexpr UINT WM_APP_RESULT = WM_APP + 1;     // lParam = QueryResult*
@@ -110,6 +112,7 @@ constexpr int kCmdBarH = 46;
 constexpr int kPaneInset = 2;   // child margin inside its slot (the rounded-card gap)
 constexpr int kFrameInset = 0;  // frame flush to the slot edge (tight inter-pane seam)
 constexpr int kPaneRadius = 8;  // rounded-card corner radius
+constexpr int kFilterH = 26;    // results-pane filter field height
 
 // Multi-window: one heap AppState per window; quit when the last one closes.
 int g_windowCount = 0;
@@ -118,6 +121,8 @@ HINSTANCE g_appInstance = nullptr;
 struct AppState {
     HWND hwnd = nullptr;
     HWND hList = nullptr;
+    HWND hSearch = nullptr;       // results full-text filter field (top of the results pane)
+    HWND hSearchCount = nullptr;  // "N of M" match-count readout
     HWND hEdit = nullptr;
     HWND hSplitter = nullptr;
     HWND hStatus = nullptr;
@@ -192,6 +197,25 @@ void applyDarkTitleBar(HWND hwnd) {
 
 void showInfoDialog(HWND owner, const wchar_t* title, const std::wstring& body);
 
+// Update the "N of M" filter readout from the grid's shown/total row counts.
+void updateFilterCount(AppState* st) {
+    if (!st->hSearchCount) return;
+    int shown = 0, total = 0;
+    gridGetCounts(st->hList, shown, total);
+    wchar_t buf[64];
+    if (shown == total)
+        std::swprintf(buf, 64, L"%d rows", total);
+    else
+        std::swprintf(buf, 64, L"%d of %d", shown, total);
+    SetWindowTextW(st->hSearchCount, buf);
+}
+
+// Clear the filter field + refresh the count (called when the grid data changes).
+void resetFilterUI(AppState* st) {
+    if (st->hSearch) SetWindowTextW(st->hSearch, L"");
+    updateFilterCount(st);
+}
+
 void setStatus(AppState* st, const std::wstring& text) {
     st->statusMsg = text;
     if (st->hStatus) InvalidateRect(st->hStatus, nullptr, FALSE);
@@ -228,7 +252,7 @@ void layout(AppState* st) {
 
     // Batch all pane moves into one atomic pass so a resize repaints the panes
     // together rather than child-by-child (which causes drag lag).
-    HDWP dwp = BeginDeferWindowPos(6);
+    HDWP dwp = BeginDeferWindowPos(8);
     auto place = [&](HWND h, int x, int y, int w, int hh) {
         if (h && dwp)
             dwp = DeferWindowPos(dwp, h, nullptr, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -266,7 +290,21 @@ void layout(AppState* st) {
 
     st->listSlot = {rx, top, rx + rw, top + listH};
     st->editSlot = {rx, top + listH + splitH, rx + rw, top + listH + splitH + editH};
-    placeInset(st->hList, st->listSlot);
+    // Results pane: a full-text filter strip (field + count) on top, grid below,
+    // all within the listSlot rounded card.
+    {
+        const int liL = static_cast<int>(st->listSlot.left) + paneM;
+        const int liR = static_cast<int>(st->listSlot.right) - paneM;
+        const int liW = (std::max)(0, liR - liL);
+        const int liTop = static_cast<int>(st->listSlot.top) + paneM;
+        const int searchH = dp(kFilterH, d);
+        const int countW = (std::min)(liW, dp(104, d));
+        place(st->hSearch, liL, liTop, (std::max)(0, liW - countW), searchH);
+        place(st->hSearchCount, liR - countW, liTop, countW, searchH);
+        const int gridTop = liTop + searchH + paneM;
+        place(st->hList, liL, gridTop, liW,
+              (std::max)(0, static_cast<int>(st->listSlot.bottom) - paneM - gridTop));
+    }
     place(st->hSplitter, rx, top + listH, rw, splitH);
     placeInset(st->hEdit, st->editSlot);
     if (dwp) EndDeferWindowPos(dwp);
@@ -292,6 +330,7 @@ void showResult(AppState* st, const QueryResult& r) {
         std::swprintf(buf, 160, L"%lld rows affected · %.0f ms", r.rowsAffected,
                       r.executionTimeSec * 1000.0);
     }
+    resetFilterUI(st);  // a fresh result set starts unfiltered
     setStatus(st, buf);
 }
 
@@ -372,6 +411,7 @@ void runText(AppState* st, const std::wstring& rawText, bool clearAfter, bool re
                 break;
             case DotKind::Clear:
                 gridClear(st->hList);
+                resetFilterUI(st);
                 setStatus(st, L"Cleared.");
                 break;
             case DotKind::Reconnect:
@@ -600,6 +640,24 @@ void doConnectionDetails(AppState* st) {
 
 LRESULT CALLBACK StatusSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
+// Filter field subclass: Esc clears the filter (and the grid filter via EN_CHANGE).
+LRESULT CALLBACK SearchSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                                    DWORD_PTR ref) {
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, SearchSubclassProc, 3);
+    if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        auto* st = reinterpret_cast<AppState*>(ref);
+        SetWindowTextW(hwnd, L"");
+        if (st) {
+            gridSetFilter(st->hList, L"");
+            updateFilterCount(st);
+            SetFocus(st->hList);
+        }
+        return 0;
+    }
+    if (msg == WM_CHAR && wParam == VK_ESCAPE) return 0;  // swallow the message-beep
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 void createChildren(AppState* st, HINSTANCE hInst) {
     const Theme& th = currentTheme();
     createFonts(st);
@@ -608,6 +666,20 @@ void createChildren(AppState* st, HINSTANCE hInst) {
         0, L"SqlD2DGrid", L"", WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL, 0, 0, 0, 0,
         st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst, nullptr);
     if (th.dark) SetWindowTheme(st->hList, L"DarkMode_Explorer", nullptr);
+
+    // Results full-text filter field + match-count readout (top of the results pane).
+    st->hSearch = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+                                  0, 0, 0, 0, st->hwnd,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH)), hInst,
+                                  nullptr);
+    SendMessageW(st->hSearch, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
+    SendMessageW(st->hSearch, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter rows…"));
+    if (th.dark) SetWindowTheme(st->hSearch, L"DarkMode_Explorer", nullptr);
+    SetWindowSubclass(st->hSearch, SearchSubclassProc, 3, reinterpret_cast<DWORD_PTR>(st));
+    st->hSearchCount = CreateWindowExW(
+        0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE, 0, 0, 0, 0, st->hwnd,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCHCOUNT)), hInst, nullptr);
+    SendMessageW(st->hSearchCount, WM_SETFONT, reinterpret_cast<WPARAM>(st->hUi), TRUE);
 
     st->hSplitter = CreateWindowExW(0, kSplitterClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                                     st->hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SPLIT)),
@@ -1673,8 +1745,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             mmi->ptMinTrackSize.y = dp(600, d);
             return 0;
         }
+        case WM_CTLCOLOREDIT:
+            return dialogCtlColor(msg, wParam);
+        case WM_CTLCOLORSTATIC:
+            if (st && reinterpret_cast<HWND>(lParam) == st->hSearchCount) {
+                const Theme& th = currentTheme();
+                SetTextColor(reinterpret_cast<HDC>(wParam), th.textSecondary);
+                SetBkColor(reinterpret_cast<HDC>(wParam), th.panelBg);
+                return reinterpret_cast<LRESULT>(themeBrush(th.panelBg));
+            }
+            return dialogCtlColor(msg, wParam);
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
+            if (HIWORD(wParam) == EN_CHANGE && id == IDC_SEARCH) {
+                wchar_t buf[256];
+                GetWindowTextW(st->hSearch, buf, 256);
+                gridSetFilter(st->hList, buf);
+                updateFilterCount(st);
+                return 0;
+            }
             if (id == ID_MENU) showMainMenu(st);
             else if (id == ID_OPEN) doOpen(st);
             else if (id == ID_RUN) doRunWhole(st);
@@ -1774,6 +1863,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 applyConnectionPersistence(st);
                 st->sslActive = st->session.isSSLActive();
                 gridClear(st->hList);
+                resetFilterUI(st);
                 setTitle(st);
                 setStatus(st, st->session.statusMessage());
                 updateFlags(st);
