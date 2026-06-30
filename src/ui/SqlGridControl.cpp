@@ -24,7 +24,7 @@ constexpr int kHeaderPadX = 10;  // header text inset
 constexpr int kArrowZone = 16;   // reserved width for the sort arrow
 constexpr int kDividerHit = 4;   // half-width of the column-resize hit zone
 constexpr int kMinColW = 48;
-constexpr int kMaxColW = 440;
+constexpr int kAutoMaxColW = 440;  // auto-size cap only; manual resize is unbounded above
 constexpr int kColPad = 16;  // auto-size padding added to measured width
 
 // Context-menu command ids (local; resolved inline via TPM_RETURNCMD).
@@ -216,7 +216,7 @@ void ensureFormats(GridState* st) {
 void autoSizeColumns(GridState* st) {
     const int nc = columnCount(st);
     st->colWidth.assign(static_cast<size_t>(nc), dpx(st, kMinColW));
-    const int pad = dpx(st, kColPad), minW = dpx(st, kMinColW), maxW = dpx(st, kMaxColW);
+    const int pad = dpx(st, kColPad), minW = dpx(st, kMinColW), maxW = dpx(st, kAutoMaxColW);
     const size_t sample = (std::min)(st->result.rows.size(), static_cast<size_t>(120));
     for (int c = 0; c < nc; ++c) {
         float w = measureWidth(st->fmtHeader, st->result.columns[static_cast<size_t>(c)]) +
@@ -634,7 +634,7 @@ LRESULT CALLBACK SqlGridProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 static_cast<size_t>(st->resizeCol) < st->colWidth.size()) {
                 const int mx = GET_X_LPARAM(lParam);
                 int nw = st->resizeStartW + (mx - st->resizeStartX);
-                nw = (std::max)(dpx(st, kMinColW), (std::min)(dpx(st, kMaxColW), nw));
+                nw = (std::max)(dpx(st, kMinColW), nw);  // no upper cap — drag as wide as needed
                 st->colWidth[static_cast<size_t>(st->resizeCol)] = nw;
                 clampScroll(st);
                 InvalidateRect(hwnd, nullptr, FALSE);
