@@ -171,7 +171,7 @@ add_test(NAME AppTests COMMAND AppTests)
 # Version + build number. BUILD_NUMBER = git commit count, regenerated at
 # configure time into build/generated/version.h.
 # ---------------------------------------------------------------------------
-set(APP_VERSION "0.1.0")
+set(APP_VERSION "0.1.1")
 find_package(Git QUIET)
 set(BUILD_NUMBER 0)
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")

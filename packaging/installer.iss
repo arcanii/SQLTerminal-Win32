@@ -4,7 +4,7 @@
 ; Produces build\installer\SQLTerminal-<ver>-setup.exe.
 
 #define MyApp "SQLTerminal"
-#define MyVer "0.1.0"
+#define MyVer "0.1.1"
 
 [Setup]
 AppId={{8F3A1B62-9C44-4E0A-B7D1-2E6F5A9C0D11}}
