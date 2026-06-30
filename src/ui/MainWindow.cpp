@@ -1758,9 +1758,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             if (HIWORD(wParam) == EN_CHANGE && id == IDC_SEARCH) {
-                wchar_t buf[256];
-                GetWindowTextW(st->hSearch, buf, 256);
-                gridSetFilter(st->hList, buf);
+                const int len = GetWindowTextLengthW(st->hSearch);
+                std::wstring text(static_cast<size_t>(len) + 1, L'\0');
+                GetWindowTextW(st->hSearch, text.data(), len + 1);
+                text.resize(static_cast<size_t>(len));
+                gridSetFilter(st->hList, text);
                 updateFilterCount(st);
                 return 0;
             }

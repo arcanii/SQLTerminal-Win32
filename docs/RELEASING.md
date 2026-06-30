@@ -24,9 +24,12 @@ The running app reports its version as `APP_VERSION.BUILD` (e.g. `0.1.0.42`, fro
   covered* below.
 
 ## Per release
-1. **Bump the version** if the marketing version changes: `APP_VERSION` in
-   `CMakeLists.txt` and `MyVer` in `packaging/installer.iss`. The build number
-   (git commit count) is automatic.
+1. **Bump the version** if the marketing version changes, in all four places:
+   `APP_VERSION` in `CMakeLists.txt` (drives the About box + update checks), `MyVer`
+   in `packaging/installer.iss` (installer name/version), and the file-properties
+   version in `packaging/SQLTerminal.rc` (`FILEVERSION`/`PRODUCTVERSION` + the
+   `FileVersion`/`ProductVersion` strings) and `packaging/app.manifest`
+   (`assemblyIdentity version`). The build number (git commit count) is automatic.
 2. **Commit** everything first — the build number is baked at CMake configure
    time, so the version stamp only matches `HEAD` after a build that follows the
    commit (see the `build-stamp-after-commit` note).
