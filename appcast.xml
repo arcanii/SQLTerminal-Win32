@@ -6,13 +6,13 @@
     <description>Most recent updates to SQLTerminal for Windows</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.0.48</title>
-      <sparkle:releaseNotesLink>https://github.com/arcanii/SQLTerminal-Win32/releases/tag/v0.1.0.48</sparkle:releaseNotesLink>
-      <pubDate>Sun, 21 Jun 2026 09:50:30 +0000</pubDate>
-      <enclosure url="https://github.com/arcanii/SQLTerminal-Win32/releases/download/v0.1.0.48/SQLTerminal-0.1.0-setup.exe"
-                 sparkle:version="0.1.0.48"
-                 sparkle:edSignature="zjxRRRu2P4uh8sRxnS6M5XUrPOk+aLVJ5w6gSXZyecU7u70Cw5hirQArWdOQZwzheREdhjIFxE5KAL3OKkmmAg=="
-                 length="6266591"
+      <title>Version 0.1.1.54</title>
+      <sparkle:releaseNotesLink>https://github.com/arcanii/SQLTerminal-Win32/releases/tag/v0.1.1.54</sparkle:releaseNotesLink>
+      <pubDate>Tue, 30 Jun 2026 21:57:10 +0000</pubDate>
+      <enclosure url="https://github.com/arcanii/SQLTerminal-Win32/releases/download/v0.1.1.54/SQLTerminal-0.1.1-setup.exe"
+                 sparkle:version="0.1.1.54"
+                 sparkle:edSignature="j+vuLF+hYhtzGHyATsVB/6fteuuezcFDnNHD3/q4wl1zIEIaBWp7yCF1LqibxIGdMDSZVWqJcuvCbd7IO9S9Dw=="
+                 length="6269828"
                  type="application/octet-stream"/>
     </item>
   </channel>
